@@ -1,0 +1,1489 @@
+; M5 renderer: BSP-driven seg rasterizer with variable floor/ceiling heights,
+; per-column occlusion clips, two-sided portals (upper/lower walls), per-sector
+; light + distance diminishing.
+;
+; Per seg: transform endpoints (4 mul16s each), near-clip via reciprocal
+; fraction, project (col = 16 + hi16(tx*rzh)>>3). Heights use Doom's trick:
+; screen row offset = (h * rzh) >> 15 is linear in screen x, so multiply once
+; per seg endpoint and add a step per column — no per-column multiplies.
+;
+; Screen rows: horizon at row 10; rowtop = 10 - (hceil*rzh>>15),
+; rowbot = 10 + (hfloor*rzh>>15); heights precomputed relative to eye (48u).
+;
+; Known simplifications (for the feasibility doc):
+;   - affine u interpolation (texture swim at oblique angles)
+;   - spans > 255 columns use a clamped interpolation step
+;   - walls taller than the view: slice class capped at 20, offset clamped
+;     to the last texture row (stretch artifact when very close)
+.include "zeropage.inc"
+.include "mmc5.inc"
+.include "globals.inc"
+
+.import mul16u, mul16s, render_bsp, find_sector
+.import sin_lo, sin_hi, recipf_lo, recipf_hi
+.import recip_col_lo, recip_col_hi, light_tbl
+.import slice_tile, slice_bank, tex_base_lo, tex_base_hi
+.import map_verts, sec_floor, sec_ceil, sec_light
+.import ceil_clip, floor_clip
+.import PLAYER_PX, PLAYER_PY, PLAYER_ANG, EYE_REL
+.import PX_MIN_H, PX_MAX_H, PY_MIN_H, PY_MAX_H
+.export render_frame, init_camera, do_seg
+
+NEAR    = 256               ; s11.4: 16 world units
+TURN    = 512               ; BAM per pass (~2.8 deg)
+CEIL_NT  = 0
+CEIL_EX  = FLAT_BANK | $80  ; palette 2
+FLOOR_NT = 2
+FLOOR_EX = FLAT_BANK | $40  ; palette 1
+
+.segment "CODE"
+
+init_camera:
+    lda #<PLAYER_PX
+    sta px
+    lda #>PLAYER_PX
+    sta px+1
+    lda #<PLAYER_PY
+    sta py
+    lda #>PLAYER_PY
+    sta py+1
+    lda #<PLAYER_ANG
+    sta pang
+    lda #>PLAYER_ANG
+    sta pang+1
+    rts
+
+render_frame:
+    lda frame_cnt
+    sta rf_t0
+    lda #0
+    sta cols_drawn
+    sta segs_drawn
+    jsr read_input
+    jsr update_cam
+    jsr find_sector     ; -> cam_sec; eye follows the camera's sector floor
+    ldx cam_sec
+    lda sec_floor,x
+    clc
+    adc #<EYE_REL
+    sta eye_h
+    ; rj_ptr = reject_tbl + cam_sec * REJECT_ROWB (tiny per-frame multiply)
+    lda #0
+    ldx cam_sec
+    beq :++
+:   clc
+    adc #<REJECT_ROWB
+    dex
+    bne :-
+:   clc
+    adc #<reject_tbl
+    sta rj_ptr
+    lda #>reject_tbl
+    adc #0
+    sta rj_ptr+1
+    lda front_buf
+    eor #1
+    sta rf_back
+    asl
+    asl
+    asl
+    asl
+    asl
+    sta rf_backoff
+    jsr render_bsp
+    lda frame_cnt
+    sec
+    sbc rf_t0
+    sta pass_frames
+    rts
+
+read_input:
+    lda #1
+    sta $4016
+    lda #0
+    sta $4016
+    ldx #8
+@l: lda $4016
+    lsr
+    ror joy1
+    dex
+    bne @l
+    rts
+
+update_cam:
+    lda joy1
+    and #$40            ; Left: rotate CCW
+    beq :+
+    lda pang
+    clc
+    adc #<TURN
+    sta pang
+    lda pang+1
+    adc #>TURN
+    sta pang+1
+:   lda joy1
+    and #$80            ; Right: rotate CW
+    beq :+
+    lda pang
+    sec
+    sbc #<TURN
+    sta pang
+    lda pang+1
+    sbc #>TURN
+    sta pang+1
+:   ldy pang+1
+    lda sin_lo,y
+    sta vsin
+    lda sin_hi,y
+    sta vsin+1
+    tya
+    clc
+    adc #64
+    tay
+    lda sin_lo,y
+    sta vcos
+    lda sin_hi,y
+    sta vcos+1
+    ; frustum edge vectors (pang +/- 45deg) for BSP bbox culling
+    lda pang+1
+    clc
+    adc #32
+    tay
+    lda sin_lo,y
+    sta vsin_l
+    lda sin_hi,y
+    sta vsin_l+1
+    tya
+    clc
+    adc #64
+    tay
+    lda sin_lo,y
+    sta vcos_l
+    lda sin_hi,y
+    sta vcos_l+1
+    lda pang+1
+    sec
+    sbc #32
+    tay
+    lda sin_lo,y
+    sta vsin_r
+    lda sin_hi,y
+    sta vsin_r+1
+    tya
+    clc
+    adc #64
+    tay
+    lda sin_lo,y
+    sta vcos_r
+    lda sin_hi,y
+    sta vcos_r+1
+    lda joy1
+    and #$10            ; Up: forward (step = view dir / 2 = 8 units)
+    beq :+
+    jsr step_forward
+:   lda joy1
+    and #$20            ; Down: back
+    beq :+
+    jsr step_back
+:   ; loose world clamp, hi-byte compares against map-exported bounds
+    ; (all map coordinates are positive by converter convention)
+    lda px+1
+    cmp #<PX_MIN_H
+    bcs :+
+    jsr set_px_min
+:   lda px+1
+    cmp #<PX_MAX_H
+    bcc :+
+    jsr set_px_max
+:   lda py+1
+    cmp #<PY_MIN_H
+    bcs :+
+    jsr set_py_min
+:   lda py+1
+    cmp #<PY_MAX_H
+    bcc :+
+    jsr set_py_max
+:   rts
+
+set_px_min:
+    lda #<PX_MIN_H
+    sta px+1
+    lda #0
+    sta px
+    rts
+set_px_max:
+    lda #<PX_MAX_H
+    sta px+1
+    lda #0
+    sta px
+    rts
+set_py_min:
+    lda #<PY_MIN_H
+    sta py+1
+    lda #0
+    sta py
+    rts
+set_py_max:
+    lda #<PY_MAX_H
+    sta py+1
+    lda #0
+    sta py
+    rts
+
+step_forward:
+    jsr half_view
+    lda px
+    clc
+    adc rt_dx
+    sta px
+    lda px+1
+    adc rt_dx+1
+    sta px+1
+    lda py
+    clc
+    adc rt_dy
+    sta py
+    lda py+1
+    adc rt_dy+1
+    sta py+1
+    rts
+
+step_back:
+    jsr half_view
+    lda px
+    sec
+    sbc rt_dx
+    sta px
+    lda px+1
+    sbc rt_dx+1
+    sta px+1
+    lda py
+    sec
+    sbc rt_dy
+    sta py
+    lda py+1
+    sbc rt_dy+1
+    sta py+1
+    rts
+
+half_view:                  ; rt_dx/rt_dy = (vcos, vsin) >> 1 signed
+    lda vcos
+    sta rt_dx
+    lda vcos+1
+    sta rt_dx+1
+    cmp #$80
+    ror rt_dx+1
+    ror rt_dx
+    lda vsin
+    sta rt_dy
+    lda vsin+1
+    sta rt_dy+1
+    cmp #$80
+    ror rt_dy+1
+    ror rt_dy
+    rts
+
+; camera-relative deltas of (wx,wy) -> rt_dx/rt_dy
+sub_cam:
+    lda wx
+    sec
+    sbc px
+    sta rt_dx
+    lda wx+1
+    sbc px+1
+    sta rt_dx+1
+    lda wy
+    sec
+    sbc py
+    sta rt_dy
+    lda wy+1
+    sbc py+1
+    sta rt_dy+1
+    rts
+
+; ttz = (rt_dx*vcos + rt_dy*vsin) >> 8   (depth only — cheap early rejects)
+zdot:
+    lda rt_dx
+    sta mul_a
+    lda rt_dx+1
+    sta mul_a+1
+    lda vcos
+    sta mul_b
+    lda vcos+1
+    sta mul_b+1
+    jsr mul16s
+    lda mul_r+1
+    sta rt_acc
+    lda mul_r+2
+    sta rt_acc+1
+    lda rt_dy
+    sta mul_a
+    lda rt_dy+1
+    sta mul_a+1
+    lda vsin
+    sta mul_b
+    lda vsin+1
+    sta mul_b+1
+    jsr mul16s
+    lda rt_acc
+    clc
+    adc mul_r+1
+    sta ttz
+    lda rt_acc+1
+    adc mul_r+2
+    sta ttz+1
+    rts
+
+; ttx = (rt_dx*vsin - rt_dy*vcos) >> 8
+xdot:
+    lda rt_dx
+    sta mul_a
+    lda rt_dx+1
+    sta mul_a+1
+    lda vsin
+    sta mul_b
+    lda vsin+1
+    sta mul_b+1
+    jsr mul16s
+    lda mul_r+1
+    sta rt_acc
+    lda mul_r+2
+    sta rt_acc+1
+    lda rt_dy
+    sta mul_a
+    lda rt_dy+1
+    sta mul_a+1
+    lda vcos
+    sta mul_b
+    lda vcos+1
+    sta mul_b+1
+    jsr mul16s
+    lda rt_acc
+    sec
+    sbc mul_r+1
+    sta ttx
+    lda rt_acc+1
+    sbc mul_r+2
+    sta ttx+1
+    rts
+
+; rzh = recipf[clamp(tz>>4, 0..1023)] (table spans 4 pages -> pointer access)
+rzh_lookup:
+    lda ttz
+    sta tptr
+    lda ttz+1
+    sta tptr+1
+    .repeat 4
+    lsr tptr+1
+    ror tptr
+    .endrepeat
+    lda tptr+1
+    cmp #4
+    bcc :+
+    lda #<512
+    ldx #>512
+    rts
+:   lda tptr
+    clc
+    adc #<recipf_lo
+    sta tptr
+    lda tptr+1
+    adc #>recipf_lo
+    sta tptr+1
+    ldy #0
+    lda (tptr),y
+    pha
+    lda tptr+1
+    clc
+    adc #4
+    sta tptr+1
+    lda (tptr),y
+    tax
+    pla
+    rts
+
+; near-clip fraction: A = clamp255((NEAR - tz_behind) * recipf[dz>>4] >> 15)
+clip_frac:
+    lda rt_acc
+    sta ttz
+    lda rt_acc+1
+    sta ttz+1
+    jsr rzh_lookup
+    sta mul_b
+    stx mul_b+1
+    jsr mul16u
+    lda mul_r+3
+    bne @max
+    lda mul_r+2
+    bmi @max
+    lda mul_r+1
+    asl
+    lda mul_r+2
+    rol
+    rts
+@max:
+    lda #255
+    rts
+
+shift3_cx:              ; hi16(mul_r) >> 3 signed -> A=lo X=hi
+    .repeat 3
+    lda mul_r+3
+    cmp #$80
+    ror mul_r+3
+    ror mul_r+2
+    .endrepeat
+    lda mul_r+2
+    ldx mul_r+3
+    rts
+
+mul_h_rzh:              ; A = h (SIGNED) -> A/X = (h * rzh1) >> 8, signed
+    sta mul_a
+    ldx #0
+    ora #0              ; N from A (ldx clobbered it)
+    bpl :+
+    dex                 ; sign-extend
+:   stx mul_a+1
+    lda rzh1
+    sta mul_b
+    lda rzh1+1
+    sta mul_b+1
+    jsr mul16s
+    lda mul_r+1
+    ldx mul_r+2
+    rts
+
+mul_h_step:             ; A = h (SIGNED) -> A/X = (h * rzstep) >> 8, signed
+    sta mul_a
+    ldx #0
+    ora #0              ; N from A (ldx clobbered it)
+    bpl :+
+    dex
+:   stx mul_a+1
+    lda rzstep
+    sta mul_b
+    lda rzstep+1
+    sta mul_b+1
+    jsr mul16s
+    lda mul_r+1
+    ldx mul_r+2
+    rts
+
+clamp30:                ; signed A -> clamped to [-30, 30]
+    bpl @pos
+    cmp #<-30
+    bcs @done
+    lda #<-30
+    rts
+@pos:
+    cmp #31
+    bcc @done
+    lda #30
+@done:
+    rts
+
+clamp_row:              ; signed A -> clamped to [0, VIEW_ROWS]
+    bmi @zero
+    cmp #VIEW_ROWS+1
+    bcc @done
+    lda #VIEW_ROWS
+@done:
+    rts
+@zero:
+    lda #0
+    rts
+
+; fetch_vertex: Y = record offset of a 16-bit vertex index -> wx/wy
+fetch_vertex:
+    lda (wall_ptr),y
+    sta tptr
+    iny
+    lda (wall_ptr),y
+    sta tptr+1
+    asl tptr
+    rol tptr+1
+    asl tptr
+    rol tptr+1          ; *4
+    lda tptr
+    clc
+    adc #<map_verts
+    sta tptr
+    lda tptr+1
+    adc #>map_verts
+    sta tptr+1
+    ldy #0
+    lda (tptr),y
+    sta wx
+    iny
+    lda (tptr),y
+    sta wx+1
+    iny
+    lda (tptr),y
+    sta wy
+    iny
+    lda (tptr),y
+    sta wy+1
+    rts
+
+; set slice-LUT base pointers for a texture slot in A; X selects which pair
+; (0 = mid/upper -> sl_tp/sl_bp, 4 = lower -> sl_tp_l/sl_bp_l)
+set_texptrs:
+    tay
+    lda tex_base_lo,y
+    clc
+    adc #<slice_tile
+    sta sl_tp,x
+    lda tex_base_hi,y
+    adc #>slice_tile
+    sta sl_tp+1,x
+    lda tex_base_lo,y
+    clc
+    adc #<slice_bank
+    sta sl_bp,x
+    lda tex_base_hi,y
+    adc #>slice_bank
+    sta sl_bp+1,x
+    rts
+
+; ---------------------------------------------------------------------------
+; do_seg: rasterize one seg from (wall_ptr). Record layout (10 bytes):
+; v1 v2 (vertex indices), ulen (texels), u0, tex, tex_low, front, back
+; ---------------------------------------------------------------------------
+do_seg:
+    ldy #0
+    jsr fetch_vertex
+    jsr sub_cam
+    lda rt_dx
+    sta dx1
+    lda rt_dx+1
+    sta dx1+1
+    lda rt_dy
+    sta dy1
+    lda rt_dy+1
+    sta dy1+1
+    ldy #2
+    jsr fetch_vertex
+    jsr sub_cam         ; rt_dx/rt_dy = v2 deltas from here on
+    ; --- early backface: camera must be on the seg's right (front) side.
+    ; cross = segdy*dx1 - segdx*dy1; reject when >= 0. Two multiplies on raw
+    ; deltas — kills back-facing segs before any transform work.
+    lda rt_dy
+    sec
+    sbc dy1
+    sta mul_a           ; segdy
+    lda rt_dy+1
+    sbc dy1+1
+    sta mul_a+1
+    lda dx1
+    sta mul_b
+    lda dx1+1
+    sta mul_b+1
+    jsr mul16s
+    lda mul_r
+    sta rt_acc
+    lda mul_r+1
+    sta rt_acc+1
+    lda mul_r+2
+    pha
+    lda mul_r+3
+    pha
+    lda rt_dx
+    sec
+    sbc dx1
+    sta mul_a           ; segdx
+    lda rt_dx+1
+    sbc dx1+1
+    sta mul_a+1
+    lda dy1
+    sta mul_b
+    lda dy1+1
+    sta mul_b+1
+    jsr mul16s
+    lda rt_acc
+    sec
+    sbc mul_r
+    lda rt_acc+1
+    sbc mul_r+1
+    pla                 ; P1 byte 3 (PLA preserves carry)
+    tax
+    pla                 ; P1 byte 2
+    sbc mul_r+2
+    txa
+    sbc mul_r+3
+    bmi @facing
+    rts
+@facing:
+    lda rt_dx
+    sta dx2
+    lda rt_dx+1
+    sta dx2+1
+    lda rt_dy
+    sta dy2
+    lda rt_dy+1
+    sta dy2+1
+    ; z-first: both depths before the lateral transform
+    jsr zdot
+    lda ttz
+    sta tz2
+    lda ttz+1
+    sta tz2+1
+    lda dx1
+    sta rt_dx
+    lda dx1+1
+    sta rt_dx+1
+    lda dy1
+    sta rt_dy
+    lda dy1+1
+    sta rt_dy+1
+    jsr zdot
+    lda ttz
+    sta tz1
+    lda ttz+1
+    sta tz1+1
+    ; both endpoints behind the near plane -> out
+    lda tz1
+    sec
+    sbc #<NEAR
+    lda tz1+1
+    sbc #>NEAR
+    bpl @infront
+    lda tz2
+    sec
+    sbc #<NEAR
+    lda tz2+1
+    sbc #>NEAR
+    bpl @infront
+    rts
+@infront:
+    jsr xdot            ; v1 deltas still loaded
+    lda ttx
+    sta tx1
+    lda ttx+1
+    sta tx1+1
+    lda dx2
+    sta rt_dx
+    lda dx2+1
+    sta rt_dx+1
+    lda dy2
+    sta rt_dy
+    lda dy2+1
+    sta rt_dy+1
+    jsr xdot
+    lda ttx
+    sta tx2
+    lda ttx+1
+    sta tx2+1
+    ldy #4
+    lda (wall_ptr),y
+    sta ulen
+    iny
+    lda (wall_ptr),y
+    sta seg_texoff      ; u0, staged (uacc set below)
+    iny
+    lda (wall_ptr),y    ; tex (mid/upper)
+    ldx #0
+    jsr set_texptrs
+    ldy #7
+    lda (wall_ptr),y    ; tex_low
+    ldx #4
+    jsr set_texptrs
+    ldy #8
+    lda (wall_ptr),y    ; front sector: heights relative to eye (signed)
+    tax
+    lda sec_ceil,x
+    sec
+    sbc eye_h
+    sta seg_hc
+    lda eye_h
+    sec
+    sbc sec_floor,x
+    sta seg_hf
+    lda sec_light,x
+    sta seg_light
+    ldy #9
+    lda (wall_ptr),y
+    sta seg_back
+    ldx #0
+    cmp #$FF
+    beq :+
+    tay
+    lda sec_ceil,y
+    sec
+    sbc eye_h
+    sta seg_bhc
+    lda eye_h
+    sec
+    sbc sec_floor,y
+    sta seg_bhf
+    ldx #1
+:   stx two_sided
+
+    ; u endpoints (8.8): uacc = u0<<8, uend = (u0 + ulen)<<8
+    lda #0
+    sta uacc
+    sta uend
+    lda seg_texoff      ; u0
+    sta uacc+1
+    clc
+    adc ulen
+    sta uend+1
+
+    ; --- near clip (same structure as M4) ---
+    lda tz1
+    sec
+    sbc #<NEAR
+    sta rt_acc
+    lda tz1+1
+    sbc #>NEAR
+    sta rt_acc+1
+    bmi @behind1
+    lda tz2
+    sec
+    sbc #<NEAR
+    lda tz2+1
+    sbc #>NEAR
+    bmi @clip2
+    jmp @project
+@behind1:
+    lda tz2
+    sec
+    sbc #<NEAR
+    lda tz2+1
+    sbc #>NEAR
+    bpl @clip1
+    rts
+@clip1:
+    lda #<NEAR
+    sec
+    sbc tz1
+    sta mul_a
+    lda #>NEAR
+    sbc tz1+1
+    sta mul_a+1
+    lda tz2
+    sec
+    sbc tz1
+    sta rt_acc
+    lda tz2+1
+    sbc tz1+1
+    sta rt_acc+1
+    jsr clip_frac
+    sta tclip
+    lda tx2
+    sec
+    sbc tx1
+    sta mul_a
+    lda tx2+1
+    sbc tx1+1
+    sta mul_a+1
+    lda tclip
+    sta mul_b
+    lda #0
+    sta mul_b+1
+    jsr mul16s
+    lda tx1
+    clc
+    adc mul_r+1
+    sta tx1
+    lda tx1+1
+    adc mul_r+2
+    sta tx1+1
+    lda #<NEAR
+    sta tz1
+    lda #>NEAR
+    sta tz1+1
+    lda ulen
+    sta mul_a
+    lda #0
+    sta mul_a+1
+    jsr mul16u          ; mul_b still = t
+    lda uacc            ; uacc = u0<<8 + ulen*t
+    clc
+    adc mul_r
+    sta uacc
+    lda uacc+1
+    adc mul_r+1
+    sta uacc+1
+    jmp @project
+@clip2:
+    lda #<NEAR
+    sec
+    sbc tz2
+    sta mul_a
+    lda #>NEAR
+    sbc tz2+1
+    sta mul_a+1
+    lda tz1
+    sec
+    sbc tz2
+    sta rt_acc
+    lda tz1+1
+    sbc tz2+1
+    sta rt_acc+1
+    jsr clip_frac
+    sta tclip
+    lda tx1
+    sec
+    sbc tx2
+    sta mul_a
+    lda tx1+1
+    sbc tx2+1
+    sta mul_a+1
+    lda tclip
+    sta mul_b
+    lda #0
+    sta mul_b+1
+    jsr mul16s
+    lda tx2
+    clc
+    adc mul_r+1
+    sta tx2
+    lda tx2+1
+    adc mul_r+2
+    sta tx2+1
+    lda #<NEAR
+    sta tz2
+    lda #>NEAR
+    sta tz2+1
+    lda ulen
+    sta mul_a
+    lda #0
+    sta mul_a+1
+    jsr mul16u
+    lda uend
+    sec
+    sbc mul_r
+    sta uend
+    lda uend+1
+    sbc mul_r+1
+    sta uend+1
+
+@project:
+    lda tz1
+    sta ttz
+    lda tz1+1
+    sta ttz+1
+    jsr rzh_lookup
+    sta rzh1
+    stx rzh1+1
+    lda tz2
+    sta ttz
+    lda tz2+1
+    sta ttz+1
+    jsr rzh_lookup
+    sta rzh2
+    stx rzh2+1
+    lda tx1
+    sta mul_a
+    lda tx1+1
+    sta mul_a+1
+    lda rzh1
+    sta mul_b
+    lda rzh1+1
+    sta mul_b+1
+    jsr mul16s
+    jsr shift3_cx
+    clc
+    adc #16
+    sta cx1
+    txa
+    adc #0
+    sta cx1+1
+    lda tx2
+    sta mul_a
+    lda tx2+1
+    sta mul_a+1
+    lda rzh2
+    sta mul_b
+    lda rzh2+1
+    sta mul_b+1
+    jsr mul16s
+    jsr shift3_cx
+    clc
+    adc #16
+    sta cx2
+    txa
+    adc #0
+    sta cx2+1
+    ; reject: cx2 <= cx1 (also serves as the backface cull), off-screen
+    lda cx2
+    sec
+    sbc cx1
+    sta rt_acc
+    lda cx2+1
+    sbc cx1+1
+    sta rt_acc+1
+    bmi @rej
+    ora rt_acc
+    beq @rej
+    lda cx2+1
+    bmi @rej
+    ora cx2
+    beq @rej
+    lda cx1+1
+    bmi @spans
+    bne @rej
+    lda cx1
+    cmp #32
+    bcc @spans
+@rej:
+    rts
+
+@spans:
+    inc segs_drawn
+    lda rt_acc+1
+    beq :+
+    lda #255
+    bne :++
+:   lda rt_acc
+:   sta n0c
+    ; rzstep = (rzh2 - rzh1) / n0c (sign-magnitude; recip_col is unsigned)
+    lda rzh2
+    sec
+    sbc rzh1
+    sta mul_a
+    lda rzh2+1
+    sbc rzh1+1
+    sta mul_a+1
+    sta tclip
+    bpl :+
+    lda #0
+    sec
+    sbc mul_a
+    sta mul_a
+    lda #0
+    sbc mul_a+1
+    sta mul_a+1
+:   ldy n0c
+    lda recip_col_lo,y
+    sta mul_b
+    lda recip_col_hi,y
+    sta mul_b+1
+    jsr mul16u
+    lda tclip
+    bpl :+
+    sec
+    lda #0
+    sbc mul_r+2
+    sta rzstep
+    lda #0
+    sbc mul_r+3
+    sta rzstep+1
+    jmp @ustep
+:   lda mul_r+2
+    sta rzstep
+    lda mul_r+3
+    sta rzstep+1
+@ustep:
+    lda uend
+    sec
+    sbc uacc
+    sta mul_a
+    lda uend+1
+    sbc uacc+1
+    sta mul_a+1
+    ldy n0c
+    lda recip_col_lo,y
+    sta mul_b
+    lda recip_col_hi,y
+    sta mul_b+1
+    jsr mul16u
+    lda mul_r+2
+    sta ustep
+    lda mul_r+3
+    sta ustep+1
+    ; left clip
+    lda cx1+1
+    bpl @noadv
+    lda #0
+    sec
+    sbc cx1
+    sta rt_dx
+    lda #0
+    sbc cx1+1
+    sta rt_dx+1
+    lda rt_dx
+    sta mul_a
+    lda rt_dx+1
+    sta mul_a+1
+    lda rzstep
+    sta mul_b
+    lda rzstep+1
+    sta mul_b+1
+    jsr mul16s
+    lda rzh1
+    clc
+    adc mul_r
+    sta rzh1
+    lda rzh1+1
+    adc mul_r+1
+    sta rzh1+1
+    lda rt_dx
+    sta mul_a
+    lda rt_dx+1
+    sta mul_a+1
+    lda ustep
+    sta mul_b
+    lda ustep+1
+    sta mul_b+1
+    jsr mul16u
+    lda uacc
+    clc
+    adc mul_r
+    sta uacc
+    lda uacc+1
+    adc mul_r+1
+    sta uacc+1
+    lda #0
+    sta col_l
+    beq @setr
+@noadv:
+    lda cx1
+    sta col_l
+@setr:
+    lda cx2+1
+    bne @r32
+    lda cx2
+    cmp #33
+    bcc :+
+@r32:
+    lda #32
+:   sta col_r
+    ; fully-occluded seg? (every column in [col_l, col_r) already solid)
+    ldy col_l
+@occ:
+    lda ceil_clip,y
+    cmp floor_clip,y
+    bcc @open
+    iny
+    cpy col_r
+    bcc @occ
+    rts
+@open:
+
+    ; --- height interpolators (from the already-advanced rzh1) ---
+    lda seg_hc
+    jsr mul_h_rzh
+    sta ytop_acc
+    stx ytop_acc+1
+    lda seg_hc
+    jsr mul_h_step
+    sta ytop_step
+    stx ytop_step+1
+    lda seg_hf
+    jsr mul_h_rzh
+    sta ybot_acc
+    stx ybot_acc+1
+    lda seg_hf
+    jsr mul_h_step
+    sta ybot_step
+    stx ybot_step+1
+    lda two_sided
+    beq @cols
+    lda seg_bhc
+    jsr mul_h_rzh
+    sta btop_acc
+    stx btop_acc+1
+    lda seg_bhc
+    jsr mul_h_step
+    sta btop_step
+    stx btop_step+1
+    lda seg_bhf
+    jsr mul_h_rzh
+    sta bbot_acc
+    stx bbot_acc+1
+    lda seg_bhf
+    jsr mul_h_step
+    sta bbot_step
+    stx bbot_step+1
+
+@cols:
+    lda col_l
+    sta cur_col
+@cl:
+    lda cur_col
+    cmp col_r
+    bcc @colbody
+    rts
+@colbody:
+    ldy cur_col
+    lda ceil_clip,y
+    cmp floor_clip,y
+    bcs @advance        ; column already solid
+    ; light = min(3, sec_light + distance) -> emit_lt = light << 6
+    lda rzh1
+    asl
+    lda rzh1+1
+    rol
+    tay
+    lda light_tbl,y
+    clc
+    adc seg_light
+    cmp #4
+    bcc :+
+    lda #3
+:   tay
+    lda light_sh,y
+    sta emit_lt
+    ; phase = (uacc >> 11) & 7
+    lda uacc+1
+    lsr
+    lsr
+    lsr
+    and #7
+    sta uphase
+    ; v offsets (signed acc>>7, clamped so row math stays in 8-bit range)
+    lda ytop_acc
+    asl
+    lda ytop_acc+1
+    rol
+    jsr clamp30
+    sta vtop
+    lda ybot_acc
+    asl
+    lda ybot_acc+1
+    rol
+    jsr clamp30
+    sta vbot
+    lda two_sided
+    beq :+
+    lda btop_acc
+    asl
+    lda btop_acc+1
+    rol
+    jsr clamp30
+    sta vbtop
+    lda bbot_acc
+    asl
+    lda bbot_acc+1
+    rol
+    jsr clamp30
+    sta vbbot
+:   jsr emit_column_m5
+@advance:
+    lda rzh1
+    clc
+    adc rzstep
+    sta rzh1
+    lda rzh1+1
+    adc rzstep+1
+    sta rzh1+1
+    lda uacc
+    clc
+    adc ustep
+    sta uacc
+    lda uacc+1
+    adc ustep+1
+    sta uacc+1
+    lda ytop_acc
+    clc
+    adc ytop_step
+    sta ytop_acc
+    lda ytop_acc+1
+    adc ytop_step+1
+    sta ytop_acc+1
+    lda ybot_acc
+    clc
+    adc ybot_step
+    sta ybot_acc
+    lda ybot_acc+1
+    adc ybot_step+1
+    sta ybot_acc+1
+    lda two_sided
+    beq :+
+    lda btop_acc
+    clc
+    adc btop_step
+    sta btop_acc
+    lda btop_acc+1
+    adc btop_step+1
+    sta btop_acc+1
+    lda bbot_acc
+    clc
+    adc bbot_step
+    sta bbot_acc
+    lda bbot_acc+1
+    adc bbot_step+1
+    sta bbot_acc+1
+:   inc cur_col
+    jmp @cl
+
+; ---------------------------------------------------------------------------
+; emit_column_m5: draw one screen column of this seg into the compose buffer.
+; ---------------------------------------------------------------------------
+emit_column_m5:
+    inc cols_drawn
+    ldy cur_col
+    lda ceil_clip,y
+    sta ceil0
+    lda floor_clip,y
+    sta floor0
+    lda cur_col
+    ora rf_backoff
+    tay
+    lda colbase_lo,y
+    sta dst_nt
+    lda colbase_hi,y
+    sta dst_nt+1
+    lda dst_nt
+    clc
+    adc #$80
+    sta dst_ex
+    lda dst_nt+1
+    adc #$02
+    sta dst_ex+1
+    ; slice pointers default to the mid/upper texture
+    lda sl_tp
+    sta cur_tp
+    lda sl_tp+1
+    sta cur_tp+1
+    lda sl_bp
+    sta cur_bp
+    lda sl_bp+1
+    sta cur_bp+1
+    ; t = clamp(10 - vtop, [0,20], then [ceil0, floor0])   (vtop signed)
+    lda #10
+    sec
+    sbc vtop
+    jsr clamp_row
+    cmp ceil0
+    bcs :+
+    lda ceil0
+:   cmp floor0
+    bcc :+
+    lda floor0
+:   sta t_row
+    ; b = clamp(10 + vbot, ...)
+    lda vbot
+    clc
+    adc #10
+    jsr clamp_row
+    cmp ceil0
+    bcs :+
+    lda ceil0
+:   cmp floor0
+    bcc :+
+    lda floor0
+:   sta b_row
+    ; ceiling [ceil0, t)
+    ldy ceil0
+@ce:
+    cpy t_row
+    bcs @cedone
+    lda #CEIL_NT
+    sta (dst_nt),y
+    lda #CEIL_EX
+    sta (dst_ex),y
+    iny
+    bne @ce
+@cedone:
+    lda two_sided
+    beq @solid
+    jmp @portal
+@solid:
+    ; wall [t, b): class from span = clamp(vtop + vbot, 1..20)  (signed sum)
+    lda vtop
+    clc
+    adc vbot
+    beq @swdone
+    bmi @swdone
+    cmp #21
+    bcc :+
+    lda #20
+:   tax
+    lda span_class,x
+    jsr set_slice
+    lda vtop
+    sec
+    sbc #10
+    sta eob
+    lda t_row
+    sta ers
+    lda b_row
+    sta ere
+    jsr emit_wall_run
+@swdone:
+    ; floor [b, floor0)
+    ldy b_row
+@fl:
+    cpy floor0
+    bcs @fldone
+    lda #FLOOR_NT
+    sta (dst_nt),y
+    lda #FLOOR_EX
+    sta (dst_ex),y
+    iny
+    bne @fl
+@fldone:
+    ldy cur_col
+    lda #VIEW_ROWS
+    sta ceil_clip,y
+    lda #0
+    sta floor_clip,y
+    inc solid_cnt
+    rts
+@portal:
+    ; bt = clamp(10 - vbtop, [0,20], then [t, b])   (vbtop signed)
+    lda #10
+    sec
+    sbc vbtop
+    jsr clamp_row
+    cmp t_row
+    bcs :+
+    lda t_row
+:   cmp b_row
+    bcc :+
+    lda b_row
+:   sta bt_row
+    ; bb = clamp(10 + vbbot, [0,20], then [bt, b])
+    lda vbbot
+    clc
+    adc #10
+    jsr clamp_row
+    cmp bt_row
+    bcs :+
+    lda bt_row
+:   cmp b_row
+    bcc :+
+    lda b_row
+:   sta bb_row
+    ; upper wall [t, bt): span_u = vtop - vbtop (signed)
+    lda vtop
+    sec
+    sbc vbtop
+    bmi @noupper
+    beq @noupper
+    cmp #21
+    bcc :+
+    lda #20
+:   tax
+    lda span_class,x
+    jsr set_slice
+    lda vtop
+    sec
+    sbc #10
+    sta eob
+    lda t_row
+    sta ers
+    lda bt_row
+    sta ere
+    jsr emit_wall_run
+@noupper:
+    ; lower wall [bb, b): span_l = vbot - vbbot (signed); off = y - (10+vbbot)
+    lda vbot
+    sec
+    sbc vbbot
+    bmi @nolower
+    beq @nolower
+    cmp #21
+    bcc :+
+    lda #20
+:   tax
+    lda sl_tp_l         ; lower wall uses its own texture
+    sta cur_tp
+    lda sl_tp_l+1
+    sta cur_tp+1
+    lda sl_bp_l
+    sta cur_bp
+    lda sl_bp_l+1
+    sta cur_bp+1
+    lda span_class,x
+    jsr set_slice
+    lda vbbot
+    clc
+    adc #10
+    eor #$FF
+    clc
+    adc #1
+    sta eob
+    lda bb_row
+    sta ers
+    lda b_row
+    sta ere
+    jsr emit_wall_run
+@nolower:
+    ; floor [b, floor0)
+    ldy b_row
+@pfl:
+    cpy floor0
+    bcs @pfldone
+    lda #FLOOR_NT
+    sta (dst_nt),y
+    lda #FLOOR_EX
+    sta (dst_ex),y
+    iny
+    bne @pfl
+@pfldone:
+    ; narrow the clip window to the portal opening
+    ldy cur_col
+    lda bt_row
+    sta ceil_clip,y
+    lda bb_row
+    sta floor_clip,y
+    cmp bt_row
+    bne :+
+    inc solid_cnt       ; portal closed on this column
+:   rts
+
+set_slice:              ; A = class index -> tile_base, eclh, exbyte
+    tax                 ; (reads through cur_tp/cur_bp = &tables[tex*104])
+    lda class_h_tbl,x
+    sta eclh
+    txa
+    asl
+    asl
+    asl
+    ora uphase
+    tay
+    lda (cur_tp),y
+    sta tile_base
+    lda (cur_bp),y
+    ora emit_lt
+    sta exbyte
+    rts
+
+emit_wall_run:          ; rows [ers, ere), NT = tile_base + min(y+eob, eclh-1)
+    ldy ers
+@w:
+    cpy ere
+    bcs @done
+    tya
+    clc
+    adc eob
+    cmp eclh
+    bcc :+
+    lda eclh
+    sbc #1              ; carry is set
+:   clc
+    adc tile_base
+    sta (dst_nt),y
+    lda exbyte
+    sta (dst_ex),y
+    iny
+    bne @w
+@done:
+    rts
+
+light_sh:
+    .byte $00, $40, $80, $C0
+
+class_h_tbl:
+    .byte 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20
+
+span_class:             ; screen-row span -> smallest class >= span
+    .byte 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 12, 12
+
+; compose-buffer column base addresses: [buf*32 + col] -> NT shadow + col*20
+colbase_lo:
+    .repeat 32, c
+    .byte <(BUFA_NT + c*VIEW_ROWS)
+    .endrepeat
+    .repeat 32, c
+    .byte <(BUFB_NT + c*VIEW_ROWS)
+    .endrepeat
+colbase_hi:
+    .repeat 32, c
+    .byte >(BUFA_NT + c*VIEW_ROWS)
+    .endrepeat
+    .repeat 32, c
+    .byte >(BUFB_NT + c*VIEW_ROWS)
+    .endrepeat
