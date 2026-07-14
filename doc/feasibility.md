@@ -437,6 +437,24 @@ one timing-pad nop in emit_wall_run); if M3 starts failing with "missing
 IRQ phases" after a renderer edit, suspect timing variance, not the IRQ
 code.
 
+## Status bar (sixth session)
+
+The HUD fits with room to spare: 12 textures x 5 banks + flats = bank 60,
+leaving banks 61-63 of the 64-bank ExAttr frame window free (768 tiles).
+tilegen `build_hud` composites STBAR + STARMS + STFST01 + baked
+placeholder digits (STTNUM/STTPRCNT: 50 ammo, 100% health, 0% armor) at
+320x40, box-filters to 256x40, then quantizes each 8x8 cell against ALL
+four BG palettes (per-tile ExAttr palette choice; the HUD also uses
+color 0 — the backdrop — since the bar is opaque, giving 4 colors per
+tile where walls get 3). Deduped: 123 unique tiles in bank 61 (the full
+bar is 160 cells). Init copies the generated hud_nt/hud_ex tables into
+the nametable rows 20-24 and ExRAM; the line-160 split renders it with
+zero runtime cost. Red Doom digits land on the warm ramp (orange-brown) —
+no spare palette above line 160, since palette rewrites need blanking and
+the letterbox blank sits below the bar. Live digit updates need game
+state that does not exist yet; when it does, a digit write is a handful
+of $2007 writes in the NMI/IRQ push windows.
+
 ## Profiling harness (notes)
 
 Mesen2's lua `emu.addMemoryCallback(fn, emu.callbackType.exec, addr)`

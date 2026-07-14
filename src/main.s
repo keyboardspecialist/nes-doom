@@ -10,6 +10,9 @@
 .include "globals.inc"
 
 .import nmi_handler, irq_handler, bg_palettes
+.ifdef E1M1
+.import hud_nt, hud_ex
+.endif
 .ifndef M2DEMO
 .import render_frame, init_camera
 .endif
@@ -72,14 +75,23 @@ reset:
     sta m2_end
     jsr fill_exram_rows
 .else
-    ; status bar cells (rows 20-24, lines 160-199): flats bank, palette 1
+    ; status bar cells (rows 20-24, lines 160-199)
     ldx #0
+.ifdef E1M1
+@stbar:
+    lda hud_ex,x        ; HUD bank + per-tile palette from tilegen
+    sta EXRAM + 20*32,x
+    inx
+    cpx #160
+    bne @stbar
+.else
     lda #$40 | FLAT_BANK
 @stbar:
     sta EXRAM + 20*32,x
     inx
     cpx #160
     bne @stbar
+.endif
     ; zero both compose buffers ($6000-$69FF) so the first pushes are defined
     lda #0
     sta m2_ptr
@@ -350,18 +362,27 @@ ppu_init:
     cpx #20
     bne @ntvar
 .else
-    ; status bar rows 20-24: checker tile ($2000 + 20*32 = $2280, 160 cells)
+    ; status bar rows 20-24 ($2000 + 20*32 = $2280, 160 cells)
     lda #$22
     sta $2006
     lda #$80
     sta $2006
     ldx #0
+.ifdef E1M1
+@stnt:
+    lda hud_nt,x        ; baked Doom status bar (tilegen build_hud)
+    sta $2007
+    inx
+    cpx #160
+    bne @stnt
+.else
     lda #3
 @stnt:
     sta $2007
     inx
     cpx #160
     bne @stnt
+.endif
 .endif
     ; park VRAM address away from the palette
     lda #$20
