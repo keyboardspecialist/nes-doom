@@ -1129,6 +1129,9 @@ do_seg:
     lda rzh1+1
     sta mul_b+1
     jsr mul16s
+    lda mul_r+2
+    and #7              ; 1/8-column fraction (the bits shift3_cx drops)
+    sta frac1
     jsr shift3_cx
     clc
     adc #16
@@ -1145,6 +1148,9 @@ do_seg:
     lda rzh2+1
     sta mul_b+1
     jsr mul16s
+    lda mul_r+2
+    and #7
+    sta frac2
     jsr shift3_cx
     clc
     adc #16
@@ -1152,7 +1158,9 @@ do_seg:
     txa
     adc #0
     sta cx2+1
-    ; reject: cx2 <= cx1 (also serves as the backface cull), off-screen
+    ; reject: cx2 < cx1 (serves as the backface cull), off-screen.
+    ; cx2 == cx1 with fractional width claims its single column — thin
+    ; pillars and edge-on walls used to blink out of existence.
     lda cx2
     sec
     sbc cx1
@@ -1162,7 +1170,19 @@ do_seg:
     sta rt_acc+1
     bmi @rej
     ora rt_acc
-    beq @rej
+    bne @nzs
+    lda frac2
+    cmp frac1
+    beq @rej            ; no projected width at all
+    bcc @rej            ; inverted: degenerate
+    inc cx2
+    bne :+
+    inc cx2+1
+:   lda #1
+    sta rt_acc
+    lda #0
+    sta rt_acc+1
+@nzs:
     lda cx2+1
     bmi @rej
     ora cx2
@@ -1507,17 +1527,6 @@ do_seg:
     lsr
     lsr
     sta ek_bot
-    ; phase = (uacc >> 11) & 7; zoom classes use (uacc >> 10) & 15
-    lda uacc+1
-    lsr
-    lsr
-    tax
-    and #15
-    sta uphase2
-    txa
-    lsr
-    and #7
-    sta uphase
     ; v offsets (signed acc>>7, clamped so row math stays in 8-bit range)
     lda ytop_acc
     asl
@@ -1893,21 +1902,21 @@ emit_column_m5:
 :   rts
 
 set_slice:              ; A = class index -> tile_base, eclh, exbyte
-    tax                 ; (reads through cur_tp/cur_bp = &tables[tex*136])
+    tax                 ; (reads through cur_tp/cur_bp = &tables[tex*101])
     lda class_h_tbl,x
     sta eclh
-    lda class_base_tbl,x
-    cpx #9              ; classes 12/14/16/20 are 2x-zoom: 16 phases
-    bcs @zoom
+    ; phase = (u >> class_pshift) & class_pmask — per-class isotropic
+    ; texel widths (CLASS_TW in tilegen): 4..64 texels per column
+    lda uacc+1
+    ldy class_pshift,x
+@sh:
+    lsr
+    dey
+    bne @sh
+    and class_pmask,x
     clc
-    adc uphase
+    adc class_base_tbl,x
     tay
-    jmp @look
-@zoom:
-    clc
-    adc uphase2
-    tay
-@look:
     lda (cur_tp),y
     sta tile_base
     lda (cur_bp),y      ; bank bits 0-5 + per-slice ramp in bit 7
@@ -2011,9 +2020,16 @@ fl_thr_tbl:
 class_h_tbl:
     .byte 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20
 
-class_base_tbl:         ; LUT entry offset per class: 8 phases below class
-    .byte 0, 8, 16, 24, 32, 40, 48, 56, 64      ; index 9, 16 phases from it
-    .byte 72, 88, 104, 120
+; per-class phase extraction (texel width tw: phases = 64/tw,
+; shift = log2(tw) - 2 + 3? no: phase = (uacc16 >> (8 + log2(tw))) via
+; uacc+1 >> (log2(tw))... values below are lsr counts on uacc+1 hi byte)
+class_pshift:           ; uacc+1 >> n (tw=4:2, 8:3, 16:4, 32:5, 64:5)
+    .byte 5, 5, 5, 4, 4, 4, 4, 3, 3, 2, 2, 2, 2
+class_pmask:            ; phases-1
+    .byte 0, 1, 1, 3, 3, 3, 3, 7, 7, 15, 15, 15, 15
+class_base_tbl:         ; cumulative phase counts per class
+    .byte 0, 1, 3, 5, 9, 13, 17, 21, 29
+    .byte 37, 53, 69, 85
 
 span_class:             ; screen-row span -> smallest class >= span
     .byte 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 12, 12

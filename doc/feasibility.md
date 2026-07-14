@@ -343,6 +343,31 @@ start 20, near-wall 2). Close walls now show the texture at the correct
 scale with no repetition, sliding, or smear; light transitions read as
 dissolves instead of bands.
 
+**Isotropic slice widths (fifth session).** The 2x-zoom classes fixed
+magnification but far classes still baked 8 texels/column while their
+isotropic width is 64/h — distant walls sampled every Nth strip and
+phase-crawled under motion. Every class now bakes at the power-of-2 texel
+width nearest 64/h (CLASS_TW: class 1 -> 64, 2-3 -> 32, 4-7 -> 16,
+8-10 -> 8, 12-20 -> 4), box-filtered at bake = proper mips, so distance
+sampling is pre-filtered and stable. Phase counts scale with width
+(64/tw), so set_slice is table-driven (class_pshift/class_pmask/
+class_base_tbl, phase = (u >> shift) & mask). Fewer phases for far
+classes more than pay for the zoom slices: 1,235 tiles = 5 banks per
+texture -> 12 texture slots (12 x 5 = 60, FLAT_BANK unchanged).
+One subtlety: box filtering compresses luminance toward the mean, and
+quantizing minified slices with the texture-global thresholds flattens
+them — thresholds are re-derived per (texture, class) from the filtered
+pixels so every scale keeps its thirds.
+
+**Thin geometry (same session).** Zero-column spans were rejected at
+projection, so sub-column segs — thin pillars, edge-on walls — blinked
+out of existence. The projection already computes 1/8-column fractional
+positions (the 3 bits shift3_cx discards); they are now captured
+(frac1/frac2), and a span-0 seg with any fractional width claims its
+single column (cx2 += 1 and the normal 1-column path runs). Contiguous
+walls cannot double-draw (the column clip closes after the first paint);
+freestanding thin geometry stays visible instead of popping.
+
 **Sub-row walls no longer vanish (pop-in fix).** A wall whose screen span
 rounds to zero rows used to emit nothing — distant steps and lintels
 popped into existence on approach. But the boundary interpolators already

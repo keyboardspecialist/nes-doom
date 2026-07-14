@@ -66,11 +66,11 @@ bsp_sp      = $4E
 
 ; --- emit $60-$7F ---
 cur_col     = $60
-wtop        = $61   ; ($61-$63, $66-$67 are unused M4-era leftovers)
-wbot        = $62
-hclass      = $63
-uphase      = $64   ; 8-texel phase (u >> 3) for normal classes
-uphase2     = $65   ; 4-texel phase (u >> 2) for 2x-zoom classes (12/14/16/20)
+frac1       = $61   ; 1/8-column projection fractions of the seg endpoints
+frac2       = $62   ; (zero-span segs with frac width still claim a column)
+hclass      = $63   ; ($63-$67 unused M4-era leftovers)
+uphase      = $64
+uphase2     = $65
 lut_ptr     = $66   ; 16-bit
 dst_nt      = $68   ; 16-bit
 dst_ex      = $6A   ; 16-bit

@@ -4,7 +4,7 @@
 --
 -- Map: room A (ceil 128) + pillar, corridor (ceil 96, light 2),
 -- room B (floor 16, light 1). Textures (6 CHR banks each):
--- 1=stone (banks 6-11); 0=brick banks 0-5. FLAT_BANK=12: ceiling EX $8C, floor EX $0C/$4C.
+-- 1=stone (banks 5-9); 0=brick banks 0-4. FLAT_BANK=10: ceiling EX $8A, floor EX $0A/$4A.
 local frames = 0
 local vantage = 0
 local worstPass = 0
@@ -27,7 +27,7 @@ local function readCol(col)
 end
 
 local function isTex(v, lo, hi)
-  if v == 0x8C or v == 0x4C or v == 0x0C then return false end
+  if v == 0x8A or v == 0x4A or v == 0x0A then return false end
   local bank = v % 64
   return bank >= lo and bank <= hi
 end
@@ -58,21 +58,21 @@ emu.addEventCallback(function()
     -- portal composite left-of-center, tall south wall right
     if not checkPass() then return end
     local nt, ex = readCol(16)
-    if not isTex(ex[9], 0, 5) then
+    if not isTex(ex[9], 0, 4) then
       return fail(string.format("V1: no tex0 wall at col16 row9 (EX=%02X)", ex[9]))
     end
     if nt[10] ~= (nt[9] + 1) % 256 then return fail("V1: slice tiles not consecutive") end
     local _, ex10 = readCol(10)
     local upper, corr = false, false
     for r = 0, 19 do
-      if isTex(ex10[r], 0, 5) then upper = true end
-      if isTex(ex10[r], 6, 11) then corr = true end
+      if isTex(ex10[r], 0, 4) then upper = true end
+      if isTex(ex10[r], 5, 9) then corr = true end
     end
     if not upper then return fail("V1: portal upper wall (tex0) missing at col10") end
     if not corr then return fail("V1: corridor wall (tex1) missing through portal at col10") end
     local _, ex24 = readCol(24)
     local walls = 0
-    for r = 0, 19 do if isTex(ex24[r], 0, 11) then walls = walls + 1 end end
+    for r = 0, 19 do if isTex(ex24[r], 0, 9) then walls = walls + 1 end end
     if walls < 12 then return fail("V1: near south wall not tall at col24") end
     print("V1 OK (pass_frames=" .. emu.read(0x80, MT) .. ")")
     teleport(128, 192, 0)   -- V2: pillar dead ahead (occlusion)
@@ -82,11 +82,11 @@ emu.addEventCallback(function()
   if frames == 240 and vantage == 2 then
     if not checkPass() then return end
     local nt, ex = readCol(16)
-    if not isTex(ex[9], 6, 11) then
+    if not isTex(ex[9], 5, 9) then
       return fail(string.format("V2: pillar (tex1) not at col16 (EX=%02X)", ex[9]))
     end
     local walls = 0
-    for r = 0, 19 do if isTex(ex[r], 6, 11) then walls = walls + 1 end end
+    for r = 0, 19 do if isTex(ex[r], 5, 9) then walls = walls + 1 end end
     if walls < 12 then return fail("V2: pillar face not tall enough") end
     print("V2 OK (pass_frames=" .. emu.read(0x80, MT) .. ")")
     teleport(384, 192, 0)   -- V3: down the corridor into room B
@@ -100,8 +100,8 @@ emu.addEventCallback(function()
     -- (tex1) below it, then floor
     local farRow, stepRow = nil, nil
     for r = 0, 19 do
-      if farRow == nil and isTex(ex[r], 0, 5) then farRow = r end
-      if farRow and stepRow == nil and isTex(ex[r], 6, 11) then stepRow = r end
+      if farRow == nil and isTex(ex[r], 0, 4) then farRow = r end
+      if farRow and stepRow == nil and isTex(ex[r], 5, 9) then stepRow = r end
     end
     if not farRow then return fail("V3: far room-B wall missing at col16") end
     if not stepRow then return fail("V3: step lower wall (tex1) missing below far wall") end
@@ -119,8 +119,8 @@ emu.addEventCallback(function()
     -- expect: B-portal upper wall (tex0) above corridor content (tex1)
     local upperRow, corrRow = nil, nil
     for r = 0, 19 do
-      if upperRow == nil and isTex(ex[r], 0, 5) then upperRow = r end
-      if upperRow and corrRow == nil and isTex(ex[r], 6, 11) then corrRow = r end
+      if upperRow == nil and isTex(ex[r], 0, 4) then upperRow = r end
+      if upperRow and corrRow == nil and isTex(ex[r], 5, 9) then corrRow = r end
     end
     if not upperRow then return fail("V4: B-portal upper wall missing") end
     if not corrRow then return fail("V4: corridor beyond portal missing") end

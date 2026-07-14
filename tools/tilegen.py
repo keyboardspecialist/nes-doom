@@ -3,14 +3,14 @@
 
 --test mode (M1/M2): hand-built diagnostic banks (see test_chr below).
 
---game mode (M4/M5): 2 synthetic textures (brick, stone) -> banks 0-11,
-  flats/status at bank 12.
+--game mode (M4/M5): 2 synthetic textures (brick, stone) -> banks 0-9,
+  flats/status at bank 10.
 
 --wad WAD --texlist texlist.json (E1M1): compose each named texture from the
   WAD, palette-aware quantization per 8px strip (luminance bins, per-strip
   ramp choice, ordered dither; the ramp bit rides slice_bank bit 7), same
-  slice pipeline -> 6 banks per texture (classes 12+ carry 16-phase 2x-zoom
-  slices), flats at bank 6*ntex.
+  slice pipeline -> 5 banks per texture (per-class isotropic texel widths,
+  CLASS_TW), flats at bank 5*ntex.
 
 Slices: per (texture, height class, u-phase), an 8-px-wide column of the
 64x64 source rescaled to H tiles, contiguous within one 4KB bank. LUT output
@@ -45,12 +45,15 @@ TILE_BYTES = 16
 BANK_TILES = 256          # 4KB bank
 BANK_BYTES = BANK_TILES * TILE_BYTES
 CLASSES = [1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20]
-ZOOM_FROM = 9             # class indexes 9..12 (heights 12/14/16/20) render
-                          # 2x horizontal zoom: 4 texels per column, 16 phases
-                          # (matches their vertical magnification; without it
-                          # near walls repeat the texture at column frequency)
-BANKS_PER_TEX = 6
-SLICES_PER_TEX = ZOOM_FROM * 8 + (len(CLASSES) - ZOOM_FROM) * 16
+# Per-class texel width per 8px column (power of 2 nearest 64/h): matches
+# the class's vertical scale, so textures stay isotropic at every distance.
+# Wide (minified) slices for far classes are box-filtered at bake time —
+# proper mips, so distant walls no longer phase-crawl; narrow (magnified)
+# slices for near classes stop the column-frequency repetition.
+CLASS_TW = [64, 32, 32, 16, 16, 16, 16, 8, 8, 4, 4, 4, 4]
+CLASS_PHASES = [64 // tw for tw in CLASS_TW]
+BANKS_PER_TEX = 5
+SLICES_PER_TEX = sum(CLASS_PHASES)
 
 
 def solid(color):
@@ -386,10 +389,9 @@ def slice_banks(strips):
     rides bit 7 of the slice_bank byte (banks stay < 64, bits 6-7 free) so
     palette choice is per-slice at zero runtime cost.
 
-    Classes below ZOOM_FROM: 8 phases, 8 texels per column. Classes >=
-    ZOOM_FROM (12/14/16/20): 16 phases, 4 texels per column stretched 2x —
-    horizontal magnification matching those classes' vertical stretch
-    (without it, near walls repeat the texture at column frequency).
+    Texels per column follow CLASS_TW (isotropic per class): wide box-
+    filtered slices for far classes (stable, mip-like), narrow magnified
+    slices for near ones (no column-frequency repetition).
 
     'rgb' textures (WAD path) are box-filtered to the class size in RGB and
     quantized+dithered at final resolution — nearest decimation turned
@@ -403,16 +405,27 @@ def slice_banks(strips):
         limit = bank + BANKS_PER_TEX
         for ci, h in enumerate(CLASSES):
             hpx = h * 8
-            zoom = ci >= ZOOM_FROM
-            phases = 16 if zoom else 8
-            tw = 4 if zoom else 8       # texels per column
-            for p in range(phases):
-                ramp = ramps[p >> 1] if zoom else ramps[p]
-                x0 = p * tw
+            tw = CLASS_TW[ci]
+            scaled = []
+            if kind == "rgb":
+                # box-filter every phase strip to the class size first, then
+                # re-derive the luminance thresholds from the FILTERED pixels:
+                # filtering compresses contrast toward the mean, and the
+                # texture-global thresholds would classify everything into
+                # the mid bin (distant walls went flat)
+                for p in range(CLASS_PHASES[ci]):
+                    rows = [texmap[y][p * tw:(p + 1) * tw] for y in range(64)]
+                    scaled.append(box_resample(rows, 8, hpx))
+                lums = sorted(_lum(px) for s in scaled for row in s
+                              for px in row)
+                cp33 = lums[len(lums) // 3]
+                cp66 = lums[(2 * len(lums)) // 3]
+            for p in range(CLASS_PHASES[ci]):
+                ramp = ramps[min(7, p * tw // 8)]
                 if kind == "rgb":
-                    rows = [texmap[y][x0:x0 + tw] for y in range(64)]
-                    col = quantize_rows(box_resample(rows, 8, hpx), p33, p66)
+                    col = quantize_rows(scaled[p], cp33, cp66)
                 else:
+                    x0 = p * tw
                     col = [[texmap[y * 64 // hpx][x0 + x * tw // 8]
                             for x in range(8)] for y in range(hpx)]
                 if len(banks[bank]) // TILE_BYTES + h > BANK_TILES:
@@ -496,7 +509,7 @@ def main():
     if args.wad:
         texlist = json.load(open(args.texlist))
         rgb_maps, tex_bins, thresholds = wad_textures(args.wad, texlist)
-        expected_flat = 10 * BANKS_PER_TEX
+        expected_flat = 60      # 12 slots x 5 banks; FLAT_BANK in globals.inc
     elif args.game:
         index_maps = [brick_texture(), stone_texture()]
         # synthetic textures: nominal warm brick / cool stone bins

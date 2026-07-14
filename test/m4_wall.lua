@@ -68,19 +68,19 @@ emu.addEventCallback(function()
 
     local nt, ex = readCol(frontBase(), 16)
     -- row 1: pure ceiling (row 2 may hold a pixel-precision edge tile)
-    if ex[1] ~= 0x8C or nt[1] ~= 0x04 then
+    if ex[1] ~= 0x8A or nt[1] ~= 0x04 then
       return fail(string.format("ceiling wrong at col16 row1: NT=%02X EX=%02X", nt[1], ex[1]))
     end
-    if (ex[17] ~= 0x4C and ex[17] ~= 0x0C) or nt[17] ~= 0x02 then
+    if (ex[17] ~= 0x4A and ex[17] ~= 0x0A) or nt[17] ~= 0x02 then
       return fail(string.format("floor wrong at col16 row17: NT=%02X EX=%02X", nt[17], ex[17]))
     end
     -- wall run around the center: consecutive slice tiles, texture bank 0-3
     local mid = 9
-    if ex[mid] == 0x8C or ex[mid] == 0x4C or ex[mid] == 0x0C then
+    if ex[mid] == 0x8A or ex[mid] == 0x4A or ex[mid] == 0x0A then
       return fail("no wall at screen center")
     end
     local bank = ex[mid] % 64
-    if bank > 5 then return fail("wall EX bank not a texture bank") end
+    if bank > 4 then return fail("wall EX bank not a texture bank") end
     if nt[mid + 1] ~= (nt[mid] + 1) % 256 then
       return fail("wall slice tiles not consecutive")
     end
