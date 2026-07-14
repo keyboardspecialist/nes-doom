@@ -112,15 +112,10 @@ the ROM is NES 2.0-legal but real hardware means a custom board.
 - **Sprites are the weak point** (not yet in the PoC): OAM 8×16 with MMC5's
   separate sprite banks and prescaled frames works, but 8 sprites/scanline
   = 64px of enemy per line; flicker-cycling and low monster caps required.
-- Affine texture u (swim at oblique angles); slice-class crop stretches the
-  bottom texel row when a wall exceeds the view; spans > 255 columns use a
-  clamped interpolation step (distortion only when very close).
-  Perspective-correct u is reachable two ways: Doom's per-column
-  `rw_offset - tan(colangle - normalangle) * rw_distance` (1 multiply +
-  tan table per column, ~3% of a pass; needs the u-per-world-unit scale
-  from mapconv's x0.4 rescale pinned down), or chunked resync (exact u
-  every 8 columns, affine between). Not yet attempted; the 8-texel phase
-  quantization hides small errors, so only long oblique walls show swim.
+- Texture u is now perspective-corrected in 8-column chunks (see below);
+  residual affine drift within a chunk is under the 8-texel phase quantum.
+  Slice-class crop still stretches the bottom texel row when a wall
+  exceeds the view.
 - One shared 3-color ramp across wall textures (2bpp tiles + 4-palette ramp);
   flats are solid colors (no span texturing); no sky yet (trivial: strips).
 - Fixed eye height; camera stays walkable-area-clamped.
@@ -276,6 +271,23 @@ tiles render. The fix is three tiny emit-path branches that arm
 portal walls, and zero-span lower walls (stair edges — the common case),
 with exbyte carrying the light bits. Distant geometry now fades in as a
 1-7px line instead of appearing from nothing; same pass-frame cost.
+
+**Perspective-correct texture u (chunked resync).** u/z is linear in
+screen x, and the per-column rzh (∝1/z) interpolant already exists — so
+do_seg now also carries uoz = u·rzh/256 (16-bit, two extra multiplies per
+seg for the endpoints + one for the step). Every 8th drawn column,
+`resync_u` re-anchors the affine u accumulator with the exact
+u = (uoz << 16)/rzh — a 16-step restoring division, ~420 cycles. The
+quotient provably fits 16 bits: u < 256 texels ⇒ uoz < rzh at both
+endpoints, and both interpolate linearly, so the invariant holds at every
+column. Gated to spans > 8 columns (narrow spans can't drift a visible
+amount) and to segs whose u range doesn't wrap 256 texels (u interpolates
+mod 256 texels; a wrap makes uoz a sawtooth, not a line — those keep
+affine). Measured: zero pass-frame cost on every test vantage; visually,
+grazing views of long walls now compress texture detail toward the far
+end instead of smearing it evenly (affine's classic swim). The between-
+anchor error is bounded by 8 columns of drift, under one 8-texel phase in
+practice.
 
 ## Profiling harness (notes)
 

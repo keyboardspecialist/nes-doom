@@ -450,6 +450,54 @@ mul_h_step:             ; A = h (SIGNED) -> A/X = (h * rzstep) >> 8, signed
     ldx mul_r+2
     rts
 
+; ---------------------------------------------------------------------------
+; resync_u: uacc = (uoz_acc << 16) / rzh1 — the exact perspective u at the
+; current column. Restoring division, 16 bits: the quotient fits because
+; u < 256 texels guarantees uoz < rzh, and both interpolate linearly so the
+; invariant holds at every column. ~420 cycles, every 8th drawn column of
+; wide segs only. Clobbers mtmp, A, X, Y.
+; ---------------------------------------------------------------------------
+resync_u:
+    lda uoz_acc
+    sta mtmp            ; remainder = dividend high word (low word is 0)
+    lda uoz_acc+1
+    sta mtmp+1
+    ldx #16
+@dl:
+    asl mtmp
+    rol mtmp+1
+    bcs @sub            ; 17-bit remainder: subtract unconditionally
+    lda mtmp
+    sec
+    sbc rzh1
+    tay
+    lda mtmp+1
+    sbc rzh1+1
+    bcs @take
+    clc                 ; remainder < divisor: quotient bit 0
+    bcc @q
+@sub:
+    lda mtmp
+    sec
+    sbc rzh1
+    tay
+    lda mtmp+1
+    sbc rzh1+1
+@take:
+    sta mtmp+1
+    sty mtmp
+    sec                 ; quotient bit 1
+@q:
+    rol mtmp+2
+    rol mtmp+3
+    dex
+    bne @dl
+    lda mtmp+2
+    sta uacc
+    lda mtmp+3
+    sta uacc+1
+    rts
+
 clamp30:                ; signed A -> clamped to [-30, 30]
     bpl @pos
     cmp #<-30
@@ -1188,6 +1236,84 @@ do_seg:
     sta ustep
     lda mul_r+3
     sta ustep+1
+    ; --- perspective u (kills affine swim): uoz = u*rzh/256 is linear in
+    ; screen x, so an exact u = (uoz << 16) / rzh can re-anchor the affine
+    ; interpolation every 8 drawn columns (resync_u). Only worth it on wide
+    ; spans; skipped when the seg's u range wraps 256 texels (uoz would be
+    ; a sawtooth, not a line).
+    lda #0
+    sta persp_cnt
+    lda n0c
+    cmp #9
+    bcs :+
+    jmp @npu            ; narrow span: affine drift is invisible
+:   lda seg_texoff
+    clc
+    adc ulen
+    bcc :+
+    jmp @npu            ; u wraps mod 256 texels mid-seg
+:   lda uacc
+    sta mul_a
+    lda uacc+1
+    sta mul_a+1
+    lda rzh1
+    sta mul_b
+    lda rzh1+1
+    sta mul_b+1
+    jsr mul16u
+    lda mul_r+2         ; U1 = hi16(uacc * rzh1)
+    sta uoz_acc
+    lda mul_r+3
+    sta uoz_acc+1
+    lda uend
+    sta mul_a
+    lda uend+1
+    sta mul_a+1
+    lda rzh2
+    sta mul_b
+    lda rzh2+1
+    sta mul_b+1
+    jsr mul16u
+    ; uoz_step = (U2 - U1) / n0c, sign-magnitude (recip_col is unsigned)
+    lda mul_r+2
+    sec
+    sbc uoz_acc
+    sta mul_a
+    lda mul_r+3
+    sbc uoz_acc+1
+    sta mul_a+1
+    sta tclip
+    bpl :+
+    sec
+    lda #0
+    sbc mul_a
+    sta mul_a
+    lda #0
+    sbc mul_a+1
+    sta mul_a+1
+:   ldy n0c
+    lda recip_col_lo,y
+    sta mul_b
+    lda recip_col_hi,y
+    sta mul_b+1
+    jsr mul16u
+    lda tclip
+    bpl :+
+    sec
+    lda #0
+    sbc mul_r+2
+    sta uoz_step
+    lda #0
+    sbc mul_r+3
+    sta uoz_step+1
+    jmp :++
+:   lda mul_r+2
+    sta uoz_step
+    lda mul_r+3
+    sta uoz_step+1
+:   lda #9
+    sta persp_cnt
+@npu:
     ; left clip
     lda cx1+1
     bpl @noadv
@@ -1230,6 +1356,25 @@ do_seg:
     lda uacc+1
     adc mul_r+1
     sta uacc+1
+    lda persp_cnt
+    beq @nclu
+    lda rt_dx
+    sta mul_a
+    lda rt_dx+1
+    sta mul_a+1
+    lda uoz_step
+    sta mul_b
+    lda uoz_step+1
+    sta mul_b+1
+    jsr mul16s
+    lda uoz_acc
+    clc
+    adc mul_r
+    sta uoz_acc
+    lda uoz_acc+1
+    adc mul_r+1
+    sta uoz_acc+1
+@nclu:
     lda #0
     sta col_l
     beq @setr
@@ -1306,7 +1451,17 @@ do_seg:
     lda ceil_clip,y
     cmp floor_clip,y
     bcs @advance        ; column already solid
-    ; two light levels now (palette bit 6); the ramp is palette bit 7.
+    ; perspective-u: re-anchor uacc from uoz/rzh every 8 drawn columns
+    lda persp_cnt
+    beq :+
+    sec
+    sbc #1
+    sta persp_cnt
+    bne :+
+    jsr resync_u
+    lda #8
+    sta persp_cnt
+:   ; two light levels now (palette bit 6); the ramp is palette bit 7.
     ; dark when sector light + distance light >= 3
     lda rzh1
     asl
@@ -1386,7 +1541,16 @@ do_seg:
     lda uacc+1
     adc ustep+1
     sta uacc+1
-    lda ytop_acc
+    lda persp_cnt
+    beq :+
+    lda uoz_acc
+    clc
+    adc uoz_step
+    sta uoz_acc
+    lda uoz_acc+1
+    adc uoz_step+1
+    sta uoz_acc+1
+:   lda ytop_acc
     clc
     adc ytop_step
     sta ytop_acc

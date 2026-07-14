@@ -32,6 +32,8 @@ prg8000_sh  = $16   ; main-thread shadow of $5114 (write-only register)
 back_ready  = $17   ; composer -> pusher: back buffer holds a finished frame
 push_active = $18   ; a push_run is in flight (NMI must not start another)
 push_vec    = $1A   ; 16-bit dispatch vector
+uoz_step    = $1C   ; 16-bit, signed: per-column step of uoz (main thread;
+                    ; $1C-$1F are unused by the NMI/IRQ pusher code)
 
 ; --- math $20-$2F ---
 mul_a       = $20   ; 16-bit
@@ -125,10 +127,11 @@ bb_x1       = $86   ; bbox under test (page bytes) for bbox_cull
 bb_y1       = $87
 bb_x2       = $88
 bb_y2       = $89
-; $8A, $8B, $8E free (were per-texture ramp bits; ramps now ride bit 7 of
-; the slice_bank LUT bytes, chosen per slice by tilegen)
+uoz_acc     = $8A   ; 16-bit: u * rzh / 256 — linear in screen x, so exact
+                    ; u = (uoz << 16) / rzh at any column (perspective u)
 ek_top      = $8C   ; sub-tile pixel remainders of the wall boundaries
 ek_bot      = $8D
+persp_cnt   = $8E   ; perspective-u resync countdown; 0 = affine-only seg
 zp_canary   = $8F   ; must stay $C5
 
 ; --- seg height interpolators $B0-$BF (h * rzh >> 8, linear in screen x) ---
