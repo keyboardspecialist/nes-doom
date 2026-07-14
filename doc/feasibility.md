@@ -327,9 +327,21 @@ row. Fixes:
   ramps like yellow/gray/black. E1M1 derives tan {37,27,17} + gray
   {20,10,00}.
 
-Measured: pass-frame envelopes unchanged everywhere (M5 worst 6, E1M1
+- **Dissolve lighting.** With coherent textures, the hard 2-level
+  distance-light step read as a vertical band across long walls. Per-seg
+  light does not fix it (mapconv splits long walls at ~255 texels, so the
+  step lands mid-wall anyway — tried and reverted). Instead `light2_tbl`
+  doubles the distance-light resolution (7 values); dark at >= 6, and the
+  half-band at exactly 5 dissolves by column parity. The floor fade
+  boundary row dithers the same way. One light bit is the hard limit
+  here; the remaining lever is trading the second hue ramp for 4 light
+  levels (4 palettes = 1 ramp x 4 lights) if diminishing ever matters
+  more than hue variety.
+
+Measured: pass-frame envelopes essentially unchanged (M5 worst 7, E1M1
 start 20, near-wall 2). Close walls now show the texture at the correct
-scale with no repetition, sliding, or smear.
+scale with no repetition, sliding, or smear; light transitions read as
+dissolves instead of bands.
 
 **Sub-row walls no longer vanish (pop-in fix).** A wall whose screen span
 rounds to zero rows used to emit nothing — distant steps and lintels
