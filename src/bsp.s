@@ -12,6 +12,7 @@
 .import mul16s, do_seg
 .import map_segs, map_nodes
 .import ss_first_lo, ss_first_hi, ss_count, ss_sector
+.import ss_bx1, ss_by1, ss_bx2, ss_by2
 .import MAP_ROOT_NODE, REJECT_ROWB, reject_tbl
 .export render_bsp, find_sector, ceil_clip, floor_clip
 
@@ -49,14 +50,13 @@ bsp_node_ptr:
 ; (record offsets 12-15 = x1,y1,x2,y2 page bytes) and dots it with the view
 ; vector in page units; 3 pages of slack cover the byte granularity.
 ; ---------------------------------------------------------------------------
-node_behind:
-    ldy #14             ; bx2
-    lda vcos+1
+bbox_cull:
+    ldx #0
+    lda bb_x2
+    ldy vcos+1
     bpl :+
-    ldy #12             ; bx1
-:   ldx #0
-    lda (tptr),y
-    sec
+    lda bb_x1
+:   sec
     sbc px+1
     sta mul_a
     bpl :+
@@ -71,13 +71,12 @@ node_behind:
     sta rt_acc
     lda mul_r+2
     sta rt_acc+1
-    ldy #15             ; by2
-    lda vsin+1
+    ldx #0
+    lda bb_y2
+    ldy vsin+1
     bpl :+
-    ldy #13
-:   ldx #0
-    lda (tptr),y
-    sec
+    lda bb_y1
+:   sec
     sbc py+1
     sta mul_a
     bpl :+
@@ -107,13 +106,12 @@ node_behind:
 
     ; --- left frustum edge (pang+45): cull if the box is entirely left.
     ; cross(dL,B) = dLx*By - dLy*Bx, minimized over corners; cull if > slack.
-    ldy #13             ; y1 when dLx >= 0
-    lda vcos_l+1
+    ldx #0
+    lda bb_y1
+    ldy vcos_l+1
     bpl :+
-    ldy #15
-:   ldx #0
-    lda (tptr),y
-    sec
+    lda bb_y2
+:   sec
     sbc py+1
     sta mul_a
     bpl :+
@@ -128,13 +126,12 @@ node_behind:
     sta rt_acc
     lda mul_r+2
     sta rt_acc+1
-    ldy #14             ; x2 when dLy >= 0
-    lda vsin_l+1
+    ldx #0
+    lda bb_x2
+    ldy vsin_l+1
     bpl :+
-    ldy #12
-:   ldx #0
-    lda (tptr),y
-    sec
+    lda bb_x1
+:   sec
     sbc px+1
     sta mul_a
     bpl :+
@@ -163,13 +160,12 @@ node_behind:
 
     ; --- right frustum edge (pang-45): cull if entirely right.
     ; cross maximized over corners; cull if < -slack.
-    ldy #15             ; y2 when dRx >= 0
-    lda vcos_r+1
+    ldx #0
+    lda bb_y2
+    ldy vcos_r+1
     bpl :+
-    ldy #13
-:   ldx #0
-    lda (tptr),y
-    sec
+    lda bb_y1
+:   sec
     sbc py+1
     sta mul_a
     bpl :+
@@ -184,13 +180,12 @@ node_behind:
     sta rt_acc
     lda mul_r+2
     sta rt_acc+1
-    ldy #12             ; x1 when dRy >= 0
-    lda vsin_r+1
+    ldx #0
+    lda bb_x1
+    ldy vsin_r+1
     bpl :+
-    ldy #14
-:   ldx #0
-    lda (tptr),y
-    sec
+    lda bb_x2
+:   sec
     sbc px+1
     sta mul_a
     bpl :+
@@ -322,9 +317,21 @@ render_bsp:
     jmp @leaf
 @node:
     jsr bsp_node_ptr
-    jsr node_behind
+    ldy #12             ; subtree bbox -> zp for the shared cull
+    lda (tptr),y
+    sta bb_x1
+    iny
+    lda (tptr),y
+    sta bb_y1
+    iny
+    lda (tptr),y
+    sta bb_x2
+    iny
+    lda (tptr),y
+    sta bb_y2
+    jsr bbox_cull
     bcc :+
-    jmp @pop            ; whole subtree behind the camera
+    jmp @pop            ; whole subtree outside the view
 :   jsr node_side
     ; push far child (the pair at Y^2), descend into near
     lda (tptr),y
@@ -388,6 +395,22 @@ draw_subsector:         ; X = subsector index
     lda bit_tbl,y
     and rt_acc
     beq :+
+    rts
+:   ; leaf-level bbox cull (much tighter than the node unions)
+    lda ss_bx1,x
+    sta bb_x1
+    lda ss_by1,x
+    sta bb_y1
+    lda ss_bx2,x
+    sta bb_x2
+    lda ss_by2,x
+    sta bb_y2
+    txa
+    pha
+    jsr bbox_cull
+    pla
+    tax
+    bcc :+
     rts
 :   lda ss_first_lo,x
     sta ss_idx

@@ -22,19 +22,22 @@
 .import mul16u, mul16s, render_bsp, find_sector
 .import sin_lo, sin_hi, recipf_lo, recipf_hi
 .import recip_col_lo, recip_col_hi, light_tbl
-.import slice_tile, slice_bank, tex_base_lo, tex_base_hi
+.import slice_tile, slice_bank, tex_base_lo, tex_base_hi, tex_ramp
 .import map_verts, sec_floor, sec_ceil, sec_light
 .import ceil_clip, floor_clip
 .import PLAYER_PX, PLAYER_PY, PLAYER_ANG, EYE_REL
 .import PX_MIN_H, PX_MAX_H, PY_MIN_H, PY_MAX_H
+.import REJECT_ROWB, reject_tbl
 .export render_frame, init_camera, do_seg
 
 NEAR    = 256               ; s11.4: 16 world units
 TURN    = 512               ; BAM per pass (~2.8 deg)
-CEIL_NT  = 0
-CEIL_EX  = FLAT_BANK | $80  ; palette 2
+CEIL_NT  = 4                ; blank tile -> the backdrop IS the ceiling color
+CEIL_EX  = FLAT_BANK | $80  ; palette bits irrelevant for a blank tile
 FLOOR_NT = 2
-FLOOR_EX = FLAT_BANK | $40  ; palette 1
+FLOOR_EX = FLAT_BANK | $40  ; ramp A light 1
+EDGE_TOP_BASE = 4           ; tiles 5-11: k wall rows below ceiling color
+EDGE_BOT_BASE = 11          ; tiles 12-18: k wall rows above floor color
 
 .segment "CODE"
 
@@ -525,7 +528,8 @@ fetch_vertex:
     rts
 
 ; set slice-LUT base pointers for a texture slot in A; X selects which pair
-; (0 = mid/upper -> sl_tp/sl_bp, 4 = lower -> sl_tp_l/sl_bp_l)
+; (0 = mid/upper -> sl_tp/sl_bp, 4 = lower -> sl_tp_l/sl_bp_l).
+; Returns the texture's ramp bit ($00/$80) in A.
 set_texptrs:
     tay
     lda tex_base_lo,y
@@ -542,6 +546,7 @@ set_texptrs:
     lda tex_base_hi,y
     adc #>slice_bank
     sta sl_bp+1,x
+    lda tex_ramp,y
     rts
 
 ; ---------------------------------------------------------------------------
@@ -682,10 +687,12 @@ do_seg:
     lda (wall_ptr),y    ; tex (mid/upper)
     ldx #0
     jsr set_texptrs
+    sta seg_rmp
     ldy #7
     lda (wall_ptr),y    ; tex_low
     ldx #4
     jsr set_texptrs
+    sta seg_rmp_l
     ldy #8
     lda (wall_ptr),y    ; front sector: heights relative to eye (signed)
     tax
@@ -1109,7 +1116,8 @@ do_seg:
     lda ceil_clip,y
     cmp floor_clip,y
     bcs @advance        ; column already solid
-    ; light = min(3, sec_light + distance) -> emit_lt = light << 6
+    ; two light levels now (palette bit 6); the ramp is palette bit 7.
+    ; dark when sector light + distance light >= 3
     lda rzh1
     asl
     lda rzh1+1
@@ -1118,12 +1126,26 @@ do_seg:
     lda light_tbl,y
     clc
     adc seg_light
-    cmp #4
+    cmp #3
+    lda #0
     bcc :+
-    lda #3
-:   tay
-    lda light_sh,y
-    sta emit_lt
+    lda #$40
+:   sta emit_lt
+    ; sub-tile pixel remainders of the front boundaries (acc bits 4-6)
+    lda ytop_acc
+    and #$70
+    lsr
+    lsr
+    lsr
+    lsr
+    sta ek_top
+    lda ybot_acc
+    and #$70
+    lsr
+    lsr
+    lsr
+    lsr
+    sta ek_bot
     ; phase = (uacc >> 11) & 7
     lda uacc+1
     lsr
@@ -1231,7 +1253,7 @@ emit_column_m5:
     lda dst_nt+1
     adc #$02
     sta dst_ex+1
-    ; slice pointers default to the mid/upper texture
+    ; slice pointers + ramp default to the mid/upper texture
     lda sl_tp
     sta cur_tp
     lda sl_tp+1
@@ -1240,6 +1262,11 @@ emit_column_m5:
     sta cur_bp
     lda sl_bp+1
     sta cur_bp+1
+    lda seg_rmp
+    sta cur_rmp
+    lda #0
+    sta ew_top
+    sta ew_bot
     ; t = clamp(10 - vtop, [0,20], then [ceil0, floor0])   (vtop signed)
     lda #10
     sec
@@ -1301,6 +1328,9 @@ emit_column_m5:
     lda b_row
     sta ere
     jsr emit_wall_run
+    lda #1
+    sta ew_top
+    sta ew_bot
 @swdone:
     ; floor [b, floor0)
     ldy b_row
@@ -1314,6 +1344,7 @@ emit_column_m5:
     iny
     bne @fl
 @fldone:
+    jsr emit_edges
     ldy cur_col
     lda #VIEW_ROWS
     sta ceil_clip,y
@@ -1367,6 +1398,8 @@ emit_column_m5:
     lda bt_row
     sta ere
     jsr emit_wall_run
+    lda #1
+    sta ew_top
 @noupper:
     ; lower wall [bb, b): span_l = vbot - vbbot (signed); off = y - (10+vbbot)
     lda vbot
@@ -1378,7 +1411,7 @@ emit_column_m5:
     bcc :+
     lda #20
 :   tax
-    lda sl_tp_l         ; lower wall uses its own texture
+    lda sl_tp_l         ; lower wall uses its own texture + ramp
     sta cur_tp
     lda sl_tp_l+1
     sta cur_tp+1
@@ -1386,6 +1419,8 @@ emit_column_m5:
     sta cur_bp
     lda sl_bp_l+1
     sta cur_bp+1
+    lda seg_rmp_l
+    sta cur_rmp
     lda span_class,x
     jsr set_slice
     lda vbbot
@@ -1400,6 +1435,8 @@ emit_column_m5:
     lda b_row
     sta ere
     jsr emit_wall_run
+    lda #1
+    sta ew_bot
 @nolower:
     ; floor [b, floor0)
     ldy b_row
@@ -1413,6 +1450,7 @@ emit_column_m5:
     iny
     bne @pfl
 @pfldone:
+    jsr emit_edges
     ; narrow the clip window to the portal opening
     ldy cur_col
     lda bt_row
@@ -1438,7 +1476,65 @@ set_slice:              ; A = class index -> tile_base, eclh, exbyte
     sta tile_base
     lda (cur_bp),y
     ora emit_lt
+    ora cur_rmp
     sta exbyte
+    rts
+
+; ---------------------------------------------------------------------------
+; emit_edges: pixel-precision silhouettes. When a wall run was drawn at the
+; front ceiling/floor boundary and the boundary has a sub-tile remainder,
+; overwrite the adjacent flat row with a shared edge tile (ceiling color
+; above / flat wall color below, or wall above / floor color below). Skipped
+; when the boundary was clipped (raw row != clamped row) or out of window.
+; ---------------------------------------------------------------------------
+emit_edges:
+    lda ew_top
+    beq @net
+    lda ek_top
+    beq @net
+    lda #10
+    sec
+    sbc vtop
+    cmp t_row
+    bne @net            ; boundary was clip-adjusted -> no edge
+    lda t_row
+    cmp ceil0
+    beq @net            ; no room above inside the clip window
+    bcc @net
+    sec
+    sbc #1
+    tay
+    lda #EDGE_TOP_BASE
+    clc
+    adc ek_top
+    sta (dst_nt),y
+    lda exbyte
+    and #$C0
+    ora #FLAT_BANK
+    sta (dst_ex),y
+@net:
+    lda ew_bot
+    beq @neb
+    lda ek_bot
+    beq @neb
+    lda vbot
+    clc
+    adc #10
+    cmp b_row
+    bne @neb
+    lda b_row
+    cmp floor0
+    bcs @neb
+    tay
+    lda #EDGE_BOT_BASE
+    clc
+    adc ek_bot
+    sta (dst_nt),y
+    lda exbyte
+    and #$C0
+    ora #FLAT_BANK
+    sta (dst_ex),y
+@neb:
     rts
 
 emit_wall_run:          ; rows [ers, ere), NT = tile_base + min(y+eob, eclh-1)

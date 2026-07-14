@@ -9,7 +9,7 @@
 .include "mmc5.inc"
 .include "globals.inc"
 
-.import nmi_handler, irq_handler
+.import nmi_handler, irq_handler, bg_palettes
 .ifndef M2DEMO
 .import render_frame, init_camera
 .endif
@@ -286,13 +286,22 @@ ppu_init:
     sta $2006
     lda #$00
     sta $2006
+    ; BG palettes come from the generated texture data (tilegen derives the
+    ; ramp from the actual texture colors); sprite palettes are static
     ldx #0
 @pal:
-    lda palette,x
+    lda bg_palettes,x
     sta $2007
     inx
-    cpx #32
+    cpx #16
     bne @pal
+    ldx #0
+@spal:
+    lda palette_spr,x
+    sta $2007
+    inx
+    cpx #16
+    bne @spal
     ; clear NT0 + attributes (attributes unused in ExAttr mode)
     lda #$20
     sta $2006
@@ -361,13 +370,7 @@ ppu_init:
     sta $2006
     rts
 
-palette:
-    ; BG: 4 palettes = one ramp at 4 brightness levels (light diminishing)
-    .byte $0F, $37, $27, $16    ; light 0 (brightest)
-    .byte $0F, $27, $16, $06    ; light 1
-    .byte $0F, $16, $06, $0D    ; light 2
-    .byte $0F, $06, $0D, $0F    ; light 3 (darkest)
-    ; sprites
+palette_spr:
     .byte $0F, $30, $26, $05
     .byte $0F, $30, $2A, $1A
     .byte $0F, $30, $22, $12
