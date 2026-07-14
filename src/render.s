@@ -1791,6 +1791,12 @@ emit_column_m5:
     sec
     sbc #10
     sta eob
+    lda ek_top          ; true top sits ek/8 rows above the snapped row:
+    lsr                 ; round the texture anchor instead of flooring, or
+    lsr                 ; adjacent columns jitter up to half a row
+    clc                 ; (branchless: constant time, the M3 IRQ phase is
+    adc eob             ; 1-cycle sensitive to composer timing variance)
+    sta eob
     lda t_row
     sta ers
     lda b_row
@@ -1888,6 +1894,12 @@ emit_column_m5:
     sec
     sbc #10
     sta eob
+    lda ek_top
+    lsr
+    lsr
+    clc
+    adc eob
+    sta eob
     lda t_row
     sta ers
     lda bt_row
@@ -1932,6 +1944,19 @@ emit_column_m5:
     eor #$FF
     clc
     adc #1
+    sta eob
+    lda bbot_acc        ; back-floor sub-row fraction: >= 4px means the
+    and #$40            ; true top is over half a row below the snapped row
+    lsr
+    lsr
+    lsr
+    lsr
+    lsr
+    lsr
+    sta mtmp
+    lda eob
+    sec
+    sbc mtmp
     sta eob
     lda bb_row
     sta ers
@@ -2073,7 +2098,10 @@ emit_wall_run:          ; rows [ers, ere), NT = tile_base +
     tya
     clc
     adc eob
-    ldx vshift
+    bpl :+
+    lda #0              ; sub-row rounding can push the first row to -1
+:   nop                 ; timing pad: without it the M3 IRQ-entry latency
+    ldx vshift          ; phase-locks and ~16% of scanline reads land on 159
     beq :++
 :   lsr
     dex
