@@ -1,7 +1,7 @@
 -- E1M1: real WAD content through the full pipeline. Structural asserts on
 -- the compose buffer at the player start plus a cheap enclosed vantage.
 -- Textures: slots in banks 0-59 (4 per texture), flats bank 60
--- (ceiling EX $BC, floor EX $7C).
+-- (ceiling EX $BC, floor EX $3C/$7C by light level).
 local frames = 0
 local MT = nil
 
@@ -21,7 +21,7 @@ local function readCol(col)
 end
 
 local function isWall(v)
-  return v ~= 0xBC and v ~= 0x7C and v ~= 0 and (v % 64) < 60
+  return v ~= 0xBC and v ~= 0x7C and v ~= 0x3C and v ~= 0 and (v % 64) < 60
 end
 
 emu.addEventCallback(function()
@@ -42,7 +42,7 @@ emu.addEventCallback(function()
       local hasCeil, hasWall, hasFloor = false, false, false
       for r = 0, 19 do
         if ex[r] == 0xBC then hasCeil = true end
-        if ex[r] == 0x7C then hasFloor = true end
+        if ex[r] == 0x7C or ex[r] == 0x3C then hasFloor = true end
         if isWall(ex[r]) then hasWall = true end
       end
       if hasCeil and hasWall and hasFloor then found = found + 1 end

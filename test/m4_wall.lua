@@ -71,12 +71,12 @@ emu.addEventCallback(function()
     if ex[1] ~= 0x88 or nt[1] ~= 0x04 then
       return fail(string.format("ceiling wrong at col16 row1: NT=%02X EX=%02X", nt[1], ex[1]))
     end
-    if ex[17] ~= 0x48 or nt[17] ~= 0x02 then
+    if (ex[17] ~= 0x48 and ex[17] ~= 0x08) or nt[17] ~= 0x02 then
       return fail(string.format("floor wrong at col16 row17: NT=%02X EX=%02X", nt[17], ex[17]))
     end
     -- wall run around the center: consecutive slice tiles, texture bank 0-3
     local mid = 9
-    if ex[mid] == 0x88 or ex[mid] == 0x48 then
+    if ex[mid] == 0x88 or ex[mid] == 0x48 or ex[mid] == 0x08 then
       return fail("no wall at screen center")
     end
     local bank = ex[mid] % 64

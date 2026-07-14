@@ -125,11 +125,10 @@ bb_x1       = $86   ; bbox under test (page bytes) for bbox_cull
 bb_y1       = $87
 bb_x2       = $88
 bb_y2       = $89
-seg_rmp     = $8A   ; ramp bit ($00/$80) of the mid/upper texture
-seg_rmp_l   = $8B   ; ... of the lower texture
+; $8A, $8B, $8E free (were per-texture ramp bits; ramps now ride bit 7 of
+; the slice_bank LUT bytes, chosen per slice by tilegen)
 ek_top      = $8C   ; sub-tile pixel remainders of the wall boundaries
 ek_bot      = $8D
-cur_rmp     = $8E   ; ramp bit for the wall part being emitted
 zp_canary   = $8F   ; must stay $C5
 
 ; --- seg height interpolators $B0-$BF (h * rzh >> 8, linear in screen x) ---

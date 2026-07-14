@@ -27,7 +27,7 @@ local function readCol(col)
 end
 
 local function isTex(v, lo, hi)
-  if v == 0x88 or v == 0x48 then return false end
+  if v == 0x88 or v == 0x48 or v == 0x08 then return false end
   local bank = v % 64
   return bank >= lo and bank <= hi
 end

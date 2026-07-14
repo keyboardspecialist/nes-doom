@@ -115,6 +115,12 @@ the ROM is NES 2.0-legal but real hardware means a custom board.
 - Affine texture u (swim at oblique angles); slice-class crop stretches the
   bottom texel row when a wall exceeds the view; spans > 255 columns use a
   clamped interpolation step (distortion only when very close).
+  Perspective-correct u is reachable two ways: Doom's per-column
+  `rw_offset - tan(colangle - normalangle) * rw_distance` (1 multiply +
+  tan table per column, ~3% of a pass; needs the u-per-world-unit scale
+  from mapconv's x0.4 rescale pinned down), or chunked resync (exact u
+  every 8 columns, affine between). Not yet attempted; the 8-texel phase
+  quantization hides small errors, so only long oblique walls show swim.
 - One shared 3-color ramp across wall textures (2bpp tiles + 4-palette ramp);
   flats are solid colors (no span texturing); no sky yet (trivial: strips).
 - Fixed eye height; camera stays walkable-area-clamped.
@@ -245,11 +251,31 @@ top edge steps k = 2,3,4,4,5,5,6,6 across columns — 1px silhouette steps for
 upgrade path. Portal inner boundaries (lintels/sills) stay tile-snapped by
 design — an edge tile there would paint over the portal's far content.
 
-**Future direction (noted):** ExAttr makes palette selection per-tile across
-16,384 tiles — the ramps above are a global simplification. The endgame is
-palette-AWARE quantization: tilegen scoring each slice (even each tile)
-against all 4 palettes and dithering into the best one, rather than binding
-whole textures to a ramp. Same hardware, purely a converter upgrade.
+**Palette-aware quantization (third session — the previously-noted
+"endgame", now in).** The ramp is chosen per SLICE, not per texture: the
+ramp bit rides bit 7 of each `slice_bank` LUT byte (banks stay < 64, bits
+6-7 free), so palette selection is per-8px-strip at zero runtime cost and
+the per-texture `tex_ramp` plumbing is gone. tilegen scores each strip's
+chroma-weighted bin means against both ramps — luminance-SCALED before
+comparing, the same trick as ramp derivation, because raw nearest-RGB
+matching collapses dark Doom art onto whichever ramp is darkest (tried it:
+the whole map went gray). Pixels still bin by the texture's global
+luminance thresholds (keeps relative contrast), with a 2x2 ordered dither
+in a ±30%-of-bin band around each threshold. Result: STARTAN walls carry
+warm tan strips and cool gray computer-panel strips side by side. Floors
+now take the per-column light bit (sector + distance, same `emit_lt` as
+walls) instead of a fixed light level.
+
+**Sub-row walls no longer vanish (pop-in fix).** A wall whose screen span
+rounds to zero rows used to emit nothing — distant steps and lintels
+popped into existence on approach. But the boundary interpolators already
+carry sub-tile fractions: a zero-row wall is exactly ek_top pixels above
+the row line plus ek_bot pixels below it, which is what the shared edge
+tiles render. The fix is three tiny emit-path branches that arm
+`emit_edges` (ew_top/ew_bot) for zero-span solid walls, zero-span upper
+portal walls, and zero-span lower walls (stair edges — the common case),
+with exbyte carrying the light bits. Distant geometry now fades in as a
+1-7px line instead of appearing from nothing; same pass-frame cost.
 
 ## Profiling harness (notes)
 

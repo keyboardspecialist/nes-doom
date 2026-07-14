@@ -22,7 +22,7 @@
 .import mul16u, mul16s, atan2_hi, render_bsp, find_sector
 .import sin_lo, sin_hi, recipf_lo, recipf_hi
 .import recip_col_lo, recip_col_hi, light_tbl, angcol_tbl
-.import slice_tile, slice_bank, tex_base_lo, tex_base_hi, tex_ramp
+.import slice_tile, slice_bank, tex_base_lo, tex_base_hi
 .import map_verts, sec_floor, sec_ceil, sec_light
 .import ceil_clip, floor_clip
 .import PLAYER_PX, PLAYER_PY, PLAYER_ANG, EYE_REL
@@ -40,7 +40,7 @@ TURN    = 512               ; BAM per pass (~2.8 deg)
 CEIL_NT  = 4                ; blank tile -> the backdrop IS the ceiling color
 CEIL_EX  = FLAT_BANK | $80  ; palette bits irrelevant for a blank tile
 FLOOR_NT = 2
-FLOOR_EX = FLAT_BANK | $40  ; ramp A light 1
+FLOOR_EX = FLAT_BANK        ; ramp A; light bit ORed in per column (emit_lt)
 EDGE_TOP_BASE = 4           ; tiles 5-11: k wall rows below ceiling color
 EDGE_BOT_BASE = 11          ; tiles 12-18: k wall rows above floor color
 
@@ -508,7 +508,7 @@ fetch_vertex:
 
 ; set slice-LUT base pointers for a texture slot in A; X selects which pair
 ; (0 = mid/upper -> sl_tp/sl_bp, 4 = lower -> sl_tp_l/sl_bp_l).
-; Returns the texture's ramp bit ($00/$80) in A.
+; (The palette ramp bit rides bit 7 of each slice_bank LUT byte.)
 set_texptrs:
     tay
     lda tex_base_lo,y
@@ -525,7 +525,6 @@ set_texptrs:
     lda tex_base_hi,y
     adc #>slice_bank
     sta sl_bp+1,x
-    lda tex_ramp,y
     rts
 
 ; ---------------------------------------------------------------------------
@@ -880,12 +879,10 @@ do_seg:
     lda (wall_ptr),y    ; tex (mid/upper)
     ldx #0
     jsr set_texptrs
-    sta seg_rmp
     ldy #7
     lda (wall_ptr),y    ; tex_low
     ldx #4
     jsr set_texptrs
-    sta seg_rmp_l
     ldy #8
     lda (wall_ptr),y    ; front sector: heights relative to eye (signed)
     tax
@@ -1455,8 +1452,6 @@ emit_column_m5:
     sta cur_bp
     lda sl_bp+1
     sta cur_bp+1
-    lda seg_rmp
-    sta cur_rmp
     lda #0
     sta ew_top
     sta ew_bot
@@ -1504,7 +1499,7 @@ emit_column_m5:
     lda vtop
     clc
     adc vbot
-    beq @swdone
+    beq @sliver
     bmi @swdone
     cmp #21
     bcc :+
@@ -1524,6 +1519,16 @@ emit_column_m5:
     lda #1
     sta ew_top
     sta ew_bot
+    bne @swdone
+@sliver:
+    ; zero-row wall: the boundary fractions still hold up to 7px of wall
+    ; on each side of the row line — arm emit_edges instead of vanishing
+    ; (distant walls used to pop in/out of existence here)
+    lda emit_lt
+    sta exbyte          ; edge tiles read light/ramp from exbyte bits 6-7
+    lda #1
+    sta ew_top
+    sta ew_bot
 @swdone:
     ; floor [b, floor0)
     ldy b_row
@@ -1533,6 +1538,7 @@ emit_column_m5:
     lda #FLOOR_NT
     sta (dst_nt),y
     lda #FLOOR_EX
+    ora emit_lt
     sta (dst_ex),y
     iny
     bne @fl
@@ -1575,7 +1581,7 @@ emit_column_m5:
     sec
     sbc vbtop
     bmi @noupper
-    beq @noupper
+    beq @upsliver
     cmp #21
     bcc :+
     lda #20
@@ -1593,13 +1599,19 @@ emit_column_m5:
     jsr emit_wall_run
     lda #1
     sta ew_top
+    bne @noupper
+@upsliver:
+    lda emit_lt         ; zero-row upper wall: top-edge fraction still shows
+    sta exbyte
+    lda #1
+    sta ew_top
 @noupper:
     ; lower wall [bb, b): span_l = vbot - vbbot (signed); off = y - (10+vbbot)
     lda vbot
     sec
     sbc vbbot
     bmi @nolower
-    beq @nolower
+    beq @losliver
     cmp #21
     bcc :+
     lda #20
@@ -1612,8 +1624,6 @@ emit_column_m5:
     sta cur_bp
     lda sl_bp_l+1
     sta cur_bp+1
-    lda seg_rmp_l
-    sta cur_rmp
     lda span_class,x
     jsr set_slice
     lda vbbot
@@ -1630,6 +1640,12 @@ emit_column_m5:
     jsr emit_wall_run
     lda #1
     sta ew_bot
+    bne @nolower
+@losliver:
+    lda emit_lt         ; zero-row step: bottom-edge fraction still shows
+    sta exbyte
+    lda #1
+    sta ew_bot
 @nolower:
     ; floor [b, floor0)
     ldy b_row
@@ -1639,6 +1655,7 @@ emit_column_m5:
     lda #FLOOR_NT
     sta (dst_nt),y
     lda #FLOOR_EX
+    ora emit_lt
     sta (dst_ex),y
     iny
     bne @pfl
@@ -1667,9 +1684,8 @@ set_slice:              ; A = class index -> tile_base, eclh, exbyte
     tay
     lda (cur_tp),y
     sta tile_base
-    lda (cur_bp),y
+    lda (cur_bp),y      ; bank bits 0-5 + per-slice ramp in bit 7
     ora emit_lt
-    ora cur_rmp
     sta exbyte
     rts
 
