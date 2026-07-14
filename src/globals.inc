@@ -23,8 +23,14 @@ PUSH_JMP    = $8000     ; 32 x 3-byte JMP dispatch at the start of each pusher b
 ;   vblank: entry ~30 + DMA 514 + 3x410 + restore ~140 = 1914 of 2273
 STATUS_LINE = 160
 BLANK_LINE  = 199
+SPLIT2_CMP  = 36    ; E1M1: phase-1 compare RELATIVE to the counter restart
+                    ; after the line-160 palette-swap blank (measured)
 IRQ_QUOTA = 10
+.ifdef E1M1
+NMI_QUOTA = 2       ; vblank also loads the per-sector palette set (~210 cyc)
+.else
 NMI_QUOTA = 3
+.endif
 
 VIEW_ROWS = 20
 VIEW_COLS = 32

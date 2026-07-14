@@ -49,6 +49,9 @@ irq_handler:
 .else
 
 .import push_run
+.ifdef E1M1
+.import hud_palettes
+.endif
 
 irq_handler:
     pha
@@ -57,11 +60,58 @@ irq_handler:
     lda irq_phase
     bne @phase1
     ; --- phase 0: line 160 (status bar split) ---
+.ifdef E1M1
+    ; Swap in the HUD palette set: blank rendering, stream 16 bytes into
+    ; $3F00-$3F0F, restore mid-frame scroll, unblank. The writes sweep a
+    ; visible color stripe while blanked (the "full palette" PPU quirk) —
+    ; ~2 scanlines eaten from the top of the status bar, which the HUD art
+    ; keeps black. The MMC5 scanline counter freezes while blanked, so the
+    ; 199 compare fires correspondingly late; the letterbox stays wide
+    ; enough for the push quota.
+    txa
+    pha
+    lda #0
+    sta $2001
+    lda #%10001000      ; NMI on, increment-1 for palette writes
+    sta $2000
+    bit $2002
+    lda #$3F
+    sta $2006
+    lda #$00
+    sta $2006
+    ldx #0
+@hp: lda hud_palettes,x
+    sta $2007
+    inx
+    cpx #16
+    bne @hp
+    ; mid-frame scroll re-establish: v = fineY 2, coarse Y 20 -> $2280
+    bit $2002
+    lda #$22
+    sta $2006
+    lda #$80
+    sta $2006
+    lda ppu2000_sh
+    sta $2000
+    lda ppu2001_sh
+    sta $2001           ; rendering back on
+    pla
+    tax
+    ; the mid-frame blank cleared MMC5 in-frame detection; the counter
+    ; restarts from 0 when rendering resumes (~line 162), so phase 1 arms
+    ; a RELATIVE compare measured to land the letterbox at line 199
+    lda #SPLIT2_CMP
+    sta MMC5_IRQ_CMP
+    inc irq_phase
+    pla
+    rti
+.else
     lda #BLANK_LINE
     sta MMC5_IRQ_CMP
     inc irq_phase
     pla
     rti
+.endif
 @phase1:
     ; --- phase 1: line 199 (letterbox + push) ---
     ; Last IRQ of the frame. Disable the scanline IRQ: blanking freezes the

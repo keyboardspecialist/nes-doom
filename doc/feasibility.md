@@ -455,6 +455,39 @@ the letterbox blank sits below the bar. Live digit updates need game
 state that does not exist yet; when it does, a digit write is a handful
 of $2007 writes in the NMI/IRQ push windows.
 
+## Palette game: 8 palettes per frame + per-sector sets (seventh session)
+
+The "full palette" PPU quirk (rendering disabled => the raster displays the
+palette entry the VRAM address points at; ahefner's 410-color demo) cuts
+both ways: it means palettes can only change while blanked, and the writes
+themselves paint a visible sweep. Both blank windows we already own now
+carry palette work:
+
+- **Line-160 IRQ**: blank ~2 lines, stream 16 bytes -> the status bar gets
+  its OWN 4 palettes (gray panel, STTNUM red digits, flesh face, gold
+  accents — build_hud quantizes against HUD_PALETTES now, with the face
+  columns restricted to gray/flesh so hair fringes don't grab olive). The
+  sweep smear is confined to a thin divider line the HUD art keeps black.
+  Hardware gotcha: the mid-frame blank CLEARS MMC5 in-frame detection and
+  the scanline counter restarts from zero at unblank, so phase 1 arms a
+  RELATIVE compare (SPLIT2_CMP = 36, measured to land the letterbox at
+  line 199). Probed: IRQs at 160/199 every frame.
+- **NMI (vblank)**: loads the camera sector's 16-byte palette set every
+  frame (pal_ptr = sec_pal + cam_sec*16, set by render_frame) — which is
+  simultaneously the restore from the HUD set and the mechanism for
+  **per-sector wall palettes**: mapconv records per-sector texture usage,
+  tilegen derives each sector's own warm/cool ramp pair from its textures'
+  chroma-weighted bins. Rooms get individual hues; quantization stays
+  luminance-binned with hue purely in the palette, so the recolor is
+  coherent (Doom-colormap style). NMI_QUOTA drops 3 -> 2 on E1M1 to pay
+  for the load (~210 cycles); flips 2.49 -> ~2.7 frames.
+- Backdrop formalized BLACK ($0F): the boot value ($00 gray) never
+  actually displayed before, and the per-frame load made the entry
+  authoritative — first build showed gray ceilings until corrected.
+
+Net: 8 effective BG palettes per frame, per-room hue variation, and
+per-frame dynamic palettes (damage flash, light flicker) now free.
+
 ## Ceiling check: CHR-RAM, and what headroom remains (seventh session)
 
 Asked directly: is the technique maxed out, and would CHR-RAM runtime

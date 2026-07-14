@@ -468,6 +468,19 @@ def convert_wad(wadpath, mapname):
             return slot_of[name]
         return subst_of.get(name, 0)
 
+    # per-sector texture usage (by slot) drives per-sector palette sets:
+    # the camera's sector selects its own ramp pair each frame (loaded
+    # during vblank), so rooms get individual hues
+    sec_tex = [Counter() for _ in range(len(kept))]
+    for i in kept_ss:
+        for s in ss_segs[i]:
+            back_kept = s["back"] is not None and s["back"] in kept
+            fs = sec_renum[s["front"]]
+            if s["tex"] and s["tex"] != "-":
+                sec_tex[fs][slot(s["tex"])] += 1
+            if back_kept and s["texl"] and s["texl"] != "-":
+                sec_tex[fs][slot(s["texl"])] += 1
+
     segs = []
     subsectors = []
     for i in kept_ss:
@@ -520,7 +533,8 @@ def convert_wad(wadpath, mapname):
     print(f"trim: kept {len(kept)}/{len(m['sectors'])} sectors, "
           f"{len(kept_ss)}/{len(ss_segs)} subsectors; textures: {slots}")
     return (verts, segs, nodes, subsectors, sectors, root,
-            (ppx, ppy, pang), EYE_WAD, reject), slots
+            (ppx, ppy, pang), EYE_WAD, reject), \
+        {"slots": slots, "sec_tex": [dict(c) for c in sec_tex]}
 
 
 def main():
@@ -532,10 +546,10 @@ def main():
     args = ap.parse_args()
 
     if args.wad:
-        emit_args, slots = convert_wad(args.wad, args.map)
+        emit_args, texinfo = convert_wad(args.wad, args.map)
         if args.texlist:
             with open(args.texlist, "w") as f:
-                json.dump(slots, f)
+                json.dump(texinfo, f)
         emit_map(args.out, *emit_args)
     else:
         emit_map(args.out, *build_micro())

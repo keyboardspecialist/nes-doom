@@ -26,6 +26,9 @@
 .import map_verts, sec_floor, sec_ceil, sec_light
 .import ceil_clip, floor_clip
 .import PLAYER_PX, PLAYER_PY, PLAYER_ANG, EYE_REL
+.ifdef E1M1
+.import sec_pal
+.endif
 .import PX_MIN_H, PX_MAX_H, PY_MIN_H, PY_MAX_H
 .import REJECT_ROWB, reject_tbl
 .export render_frame, init_camera, do_seg
@@ -75,6 +78,23 @@ render_frame:
     clc
     adc #<EYE_REL
     sta eye_h
+.ifdef E1M1
+    ; pal_ptr = sec_pal + cam_sec*16: the NMI loads this sector's palette
+    ; set every frame during vblank (rooms get their own hue ramps)
+    lda #0
+    sta pal_ptr+1
+    lda cam_sec
+    .repeat 4
+    asl
+    rol pal_ptr+1
+    .endrepeat
+    clc
+    adc #<sec_pal
+    sta pal_ptr
+    lda pal_ptr+1
+    adc #>sec_pal
+    sta pal_ptr+1
+.endif
     ; rj_ptr = reject_tbl + cam_sec * REJECT_ROWB (tiny per-frame multiply)
     lda #0
     ldx cam_sec

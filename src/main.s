@@ -11,7 +11,7 @@
 
 .import nmi_handler, irq_handler, bg_palettes
 .ifdef E1M1
-.import hud_nt, hud_ex
+.import hud_nt, hud_ex, sec_pal
 .endif
 .ifndef M2DEMO
 .import render_frame, init_camera
@@ -76,6 +76,13 @@ reset:
     jsr fill_exram_rows
 .else
     ; status bar cells (rows 20-24, lines 160-199)
+.ifdef E1M1
+    ; pal_ptr must be valid before the first NMI (render_frame retargets it)
+    lda #<sec_pal
+    sta pal_ptr
+    lda #>sec_pal
+    sta pal_ptr+1
+.endif
     ldx #0
 .ifdef E1M1
 @stbar:
