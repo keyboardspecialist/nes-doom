@@ -7,7 +7,8 @@
 .include "zeropage.inc"
 .include "mmc5.inc"
 
-.export mul16u, mul16s
+.import recipf_lo, atan_tbl, recip_col_lo, recip_col_hi
+.export mul16u, mul16s, atan2_hi, atan2_pg
 
 .segment "CODE"
 
@@ -84,6 +85,245 @@ mul16s:
     sbc mul_r+3
     sta mul_r+3
 :   rts
+
+; ---------------------------------------------------------------------------
+; atan2_hi: angle of (rt_dx, rt_dy) in BAM high-byte units (256 per circle,
+; CCW, 0 = +x). Division-free: fold into the first octant, then
+; t = atan_tbl[min * recipf[(max+8)>>4] >> 15] on the multiplier.
+; Returns A = angle with C clear. C set = |dx| and |dy| both < 256 (16 world
+; units): recipf clamps there and the ratio is garbage — caller must fall
+; back to the exact path.
+; Clobbers ttx, ttz, mtmp, tptr, mul regs, at_sx/at_sy/at_sw, X, Y.
+; ---------------------------------------------------------------------------
+atan2_hi:
+    ldx #0
+    lda rt_dx+1
+    bpl @xpos
+    inx
+    sec
+    lda #0
+    sbc rt_dx
+    sta ttx
+    lda #0
+    sbc rt_dx+1
+    sta ttx+1
+    jmp @dy
+@xpos:
+    lda rt_dx
+    sta ttx
+    lda rt_dx+1
+    sta ttx+1
+@dy:
+    stx at_sx
+    ldx #0
+    lda rt_dy+1
+    bpl @ypos
+    inx
+    sec
+    lda #0
+    sbc rt_dy
+    sta ttz
+    lda #0
+    sbc rt_dy+1
+    sta ttz+1
+    jmp @mm
+@ypos:
+    lda rt_dy
+    sta ttz
+    lda rt_dy+1
+    sta ttz+1
+@mm:
+    stx at_sy
+    ; min -> mul_a, max -> mtmp; at_sw = 1 when |dy| > |dx|
+    lda ttz+1
+    cmp ttx+1
+    bne :+
+    lda ttz
+    cmp ttx
+:   bcs @ybig
+    lda #0
+    sta at_sw
+    lda ttz
+    sta mul_a
+    lda ttz+1
+    sta mul_a+1
+    lda ttx
+    sta mtmp
+    lda ttx+1
+    sta mtmp+1
+    jmp @norm
+@ybig:
+    lda #1
+    sta at_sw
+    lda ttx
+    sta mul_a
+    lda ttx+1
+    sta mul_a+1
+    lda ttz
+    sta mtmp
+    lda ttz+1
+    sta mtmp+1
+@norm:
+    lda mtmp+1
+    bne :+
+    sec                 ; max < 256 -> too close, ratio unreliable
+    rts
+:   cmp #$40            ; keep (max+8)>>4 inside the 1024-entry table
+    bcc :+
+    lsr mtmp+1
+    ror mtmp
+    lsr mul_a+1
+    ror mul_a
+:   ; m = (max + 8) >> 4 (rounded), clamped to 1023
+    lda mtmp
+    clc
+    adc #8
+    sta mtmp
+    lda mtmp+1
+    adc #0
+    sta mtmp+1
+    .repeat 4
+    lsr mtmp+1
+    ror mtmp
+    .endrepeat
+    lda mtmp+1
+    cmp #4
+    bcc :+
+    lda #$FF
+    sta mtmp
+    lda #3
+    sta mtmp+1
+:   lda mtmp
+    clc
+    adc #<recipf_lo
+    sta tptr
+    lda mtmp+1
+    adc #>recipf_lo
+    sta tptr+1
+    ldy #0
+    lda (tptr),y
+    sta mul_b
+    lda tptr+1
+    clc
+    adc #4              ; recipf_hi = recipf_lo + 1KB
+    sta tptr+1
+    lda (tptr),y
+    sta mul_b+1
+    jsr mul16u
+    ; ratio index = (min * recip) >> 15, clamped to 255
+    lda mul_r+3
+    bne @imax
+    lda mul_r+2
+    bmi @imax
+    lda mul_r+1
+    asl                 ; C = result bit 15
+    lda mul_r+2
+    rol
+    jmp @fold
+@imax:
+    lda #255
+@fold:
+    ; fall through into angle_fold
+
+; angle_fold: A = ratio index (0..255) -> A = octant-folded angle, C clear.
+; Uses at_sx/at_sy/at_sw set by the caller.
+angle_fold:
+    tay
+    lda atan_tbl,y      ; 0..32 (first half-octant angle)
+    sta mtmp+2
+    lda at_sw
+    beq :+
+    lda #64             ; |dy| > |dx|: t = 64 - t
+    sec
+    sbc mtmp+2
+    sta mtmp+2
+:   lda at_sx
+    bne @xneg
+    lda at_sy
+    bne @q4
+    lda mtmp+2          ; +x +y: t
+    clc
+    rts
+@q4:
+    lda #0              ; +x -y: -t
+    sec
+    sbc mtmp+2
+    clc
+    rts
+@xneg:
+    lda at_sy
+    bne @q3
+    lda #128            ; -x +y: 128 - t
+    sec
+    sbc mtmp+2
+    clc
+    rts
+@q3:
+    lda #128            ; -x -y: 128 + t
+    clc
+    adc mtmp+2
+    clc
+    rts
+
+; ---------------------------------------------------------------------------
+; atan2_pg: angle of (mtmp+2, mtmp+3) — SIGNED page deltas (16 world units
+; per page) — in BAM high-byte units. Ratio index = min * recip_col[max]
+; >> 8 = 256*min/max on the raw MMC5 multiplier (two 8x8 products, no
+; mul16u). C clear + A = angle; C set when max(|dx|,|dy|) < 4 pages: page
+; granularity is too coarse that close, the caller must not cull.
+; Clobbers ttx, ttz, mtmp, at_sx/at_sy/at_sw, X, Y.
+; ---------------------------------------------------------------------------
+atan2_pg:
+    ldx #0
+    lda mtmp+2
+    bpl :+
+    inx
+    eor #$FF
+    clc
+    adc #1
+:   sta ttx
+    stx at_sx
+    ldx #0
+    lda mtmp+3
+    bpl :+
+    inx
+    eor #$FF
+    clc
+    adc #1
+:   sta ttz
+    stx at_sy
+    ldx #0              ; at_sw = 0: |dy| <= |dx|
+    cmp ttx             ; A = |dy|
+    bcc @xbig
+    inx
+    lda ttx             ; min = |dx|, max = |dy|
+    ldy ttz
+    jmp @ratio
+@xbig:
+    ldy ttx             ; min = |dy| (already in A), max = |dx|
+@ratio:
+    stx at_sw
+    cpy #4
+    bcs :+
+    sec                 ; max < 4 pages: too close
+    rts
+:   sta MMC5_MULT_A     ; min
+    lda recip_col_lo,y
+    sta MMC5_MULT_B
+    lda MMC5_MULT_B     ; hi byte of min * recip_lo
+    sta mtmp
+    lda recip_col_hi,y
+    sta MMC5_MULT_B     ; min retained in $5205
+    lda MMC5_MULT_B     ; hi byte of min * recip_hi: any bit -> ratio >= 1
+    bne @sat
+    lda MMC5_MULT_A     ; lo byte of min * recip_hi
+    clc
+    adc mtmp
+    bcs @sat
+    jmp angle_fold
+@sat:
+    lda #255
+    jmp angle_fold
 
 neg_a:
     sec

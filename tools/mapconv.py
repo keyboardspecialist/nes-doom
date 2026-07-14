@@ -84,7 +84,9 @@ def emit_map(path, verts, segs, nodes, subsectors, sectors, root, player,
              + 3 * len(sectors) + len(rej))
     assert total <= 8100, f"map data {total}B overflows the 8KB LUT01 bank"
     assert len(nodes) <= 255 and len(subsectors) <= 255 and len(sectors) <= 254
-    assert len(verts) <= 4096 and len(segs) <= 800
+    # 256-vertex cap: the engine caches per-vertex view angles in a 256-entry
+    # table (vert_angle in render.s) and indexes it with the low index byte
+    assert len(verts) <= 256 and len(segs) <= 800
 
     # camera clamp bounds (hi-byte compares in update_cam), 32 units inside
     xs = [v[0] for v in verts]

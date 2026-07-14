@@ -9,7 +9,7 @@
 .include "mmc5.inc"
 .include "globals.inc"
 
-.import mul16s, do_seg
+.import mul16s, do_seg, atan2_pg, angcol_tbl
 .import map_segs, map_nodes
 .import ss_first_lo, ss_first_hi, ss_count, ss_sector
 .import ss_bx1, ss_by1, ss_bx2, ss_by2
@@ -45,175 +45,183 @@ bsp_node_ptr:
     rts
 
 ; ---------------------------------------------------------------------------
-; node_behind: C set if the node's subtree bbox lies entirely behind the
-; camera plane. Picks the bbox corner farthest along the view direction
-; (record offsets 12-15 = x1,y1,x2,y2 page bytes) and dots it with the view
-; vector in page units; 3 pages of slack cover the byte granularity.
+; bbox_cull (Doom's R_CheckBBox): C set = cull the subtree — its two
+; silhouette corners subtend an angle range that is either entirely outside
+; the view frustum or covered by already-solid screen columns. Runs on
+; page-byte bbox coords (bb_x1..bb_y2) via atan2_pg: two 8x8 hardware
+; products total, no mul16s. Corners are expanded 1 page outward (bbox max
+; edges are floor-truncated by the converter) so every error is outward.
+; Keeps (C clear) when the camera is inside or within 4 pages of the box.
 ; ---------------------------------------------------------------------------
 bbox_cull:
+    ; camera region: cx/cy in 0..2 per axis -> region = cy*3 + cx
     ldx #0
-    lda bb_x2
-    ldy vcos+1
-    bpl :+
-    lda bb_x1
-:   sec
-    sbc px+1
-    sta mul_a
-    bpl :+
-    dex
-:   stx mul_a+1
-    lda vcos
-    sta mul_b
-    lda vcos+1
-    sta mul_b+1
-    jsr mul16s
-    lda mul_r+1
+    lda px+1
+    cmp bb_x1
+    bcc @gotx           ; west
+    inx
+    cmp bb_x2
+    bcc @gotx           ; inside span
+    beq @gotx
+    inx                 ; east
+@gotx:
+    ldy #0
+    lda py+1
+    cmp bb_y1
+    bcc @goty           ; south
+    iny
+    cmp bb_y2
+    bcc @goty
+    beq @goty
+    iny                 ; north
+@goty:
+    tya
+    asl
     sta rt_acc
-    lda mul_r+2
-    sta rt_acc+1
-    ldx #0
-    lda bb_y2
-    ldy vsin+1
-    bpl :+
-    lda bb_y1
-:   sec
-    sbc py+1
-    sta mul_a
-    bpl :+
-    dex
-:   stx mul_a+1
-    lda vsin
-    sta mul_b
-    lda vsin+1
-    sta mul_b+1
-    jsr mul16s
-    lda rt_acc
+    tya
     clc
-    adc mul_r+1
+    adc rt_acc
     sta rt_acc
-    lda rt_acc+1
-    adc mul_r+2
-    ; behind if z_pages + 3 < 0
-    tax
-    lda rt_acc
+    txa
     clc
-    adc #3
-    txa
-    adc #0
-    bpl :+
-    jmp @cull
-:
-
-    ; --- left frustum edge (pang+45): cull if the box is entirely left.
-    ; cross(dL,B) = dLx*By - dLy*Bx, minimized over corners; cull if > slack.
-    ldx #0
-    lda bb_y1
-    ldy vcos_l+1
-    bpl :+
-    lda bb_y2
-:   sec
-    sbc py+1
-    sta mul_a
-    bpl :+
-    dex
-:   stx mul_a+1
-    lda vcos_l
-    sta mul_b
-    lda vcos_l+1
-    sta mul_b+1
-    jsr mul16s
-    lda mul_r+1
-    sta rt_acc
-    lda mul_r+2
-    sta rt_acc+1
-    ldx #0
-    lda bb_x2
-    ldy vsin_l+1
-    bpl :+
-    lda bb_x1
-:   sec
+    adc rt_acc
+    cmp #4
+    bne :+
+    clc                 ; camera inside the box: never cull
+    rts
+:   tax                 ; X = region 0..8 (4 excluded)
+    ; left silhouette corner -> angle
+    lda bbc_xl,x
+    jsr @pickx
+    sec
     sbc px+1
-    sta mul_a
-    bpl :+
-    dex
-:   stx mul_a+1
-    lda vsin_l
-    sta mul_b
-    lda vsin_l+1
-    sta mul_b+1
-    jsr mul16s
-    lda rt_acc
+    sta mtmp+2
+    lda bbc_yl,x
+    jsr @picky
     sec
-    sbc mul_r+1
-    sta rt_acc
-    lda rt_acc+1
-    sbc mul_r+2
-    tax
-    lda rt_acc
-    sec
-    sbc #5              ; cull if min_cross > 4 pages
-    txa
-    sbc #0
-    bmi :+
-    jmp @cull
-:
-
-    ; --- right frustum edge (pang-45): cull if entirely right.
-    ; cross maximized over corners; cull if < -slack.
-    ldx #0
-    lda bb_y2
-    ldy vcos_r+1
-    bpl :+
-    lda bb_y1
-:   sec
     sbc py+1
-    sta mul_a
-    bpl :+
-    dex
-:   stx mul_a+1
-    lda vcos_r
-    sta mul_b
-    lda vcos_r+1
-    sta mul_b+1
-    jsr mul16s
-    lda mul_r+1
-    sta rt_acc
-    lda mul_r+2
-    sta rt_acc+1
-    ldx #0
-    lda bb_x1
-    ldy vsin_r+1
-    bpl :+
-    lda bb_x2
-:   sec
-    sbc px+1
-    sta mul_a
-    bpl :+
-    dex
-:   stx mul_a+1
-    lda vsin_r
-    sta mul_b
-    lda vsin_r+1
-    sta mul_b+1
-    jsr mul16s
-    lda rt_acc
+    sta mtmp+3
+    stx rt_acc          ; atan2_pg clobbers X
+    jsr atan2_pg
+    bcc :+
+    jmp @keep           ; too close for page precision: keep
+:   sta seg_a1
+    ldx rt_acc
+    ; right silhouette corner -> angle
+    lda bbc_xr,x
+    jsr @pickx
     sec
-    sbc mul_r+1
-    sta rt_acc
-    lda rt_acc+1
-    sbc mul_r+2
-    tax
-    lda rt_acc
+    sbc px+1
+    sta mtmp+2
+    lda bbc_yr,x
+    jsr @picky
+    sec
+    sbc py+1
+    sta mtmp+3
+    jsr atan2_pg
+    bcs @keep
+    sta seg_a2
+    ; same frustum-clip + occlusion scan shape as the do_seg angle gate
+    lda seg_a1
+    sec
+    sbc seg_a2
+    sta pf_span
+    ; a box subtending ~180deg (camera hugging a long box) breaks the clip
+    ; arithmetic below (page-corner error inflates span past 128) -> keep
+    cmp #124
+    bcc :+
+    jmp @keep
+:   lda seg_a1
+    sec
+    sbc pang+1
     clc
-    adc #5              ; cull if max_cross < -4 pages
-    txa
-    adc #0
-    bmi @cull
+    adc #PF_CLIP
+    cmp #2*PF_CLIP+1
+    bcc @b1ok
+    sec
+    sbc #2*PF_CLIP
+    sec
+    sbc #4
+    bcc @b1cl
+    cmp pf_span
+    bcc @b1cl
+    sec                 ; entirely off the left / behind
+    rts
+@b1cl:
+    lda #2*PF_CLIP
+@b1ok:
+    sta pf_c
+    lda seg_a2
+    sec
+    sbc pang+1
+    clc
+    adc #PF_CLIP
+    cmp #2*PF_CLIP+1
+    bcc @b2ok
+    eor #$FF
+    sec
+    sbc #3              ; (256 - idx2) - 4
+    bcc @b2cl
+    cmp pf_span
+    bcc @b2cl
+    sec                 ; entirely off the right
+    rts
+@b2cl:
+    lda #0
+@b2ok:
+    tay
+    lda angcol_tbl,y    ; right column + slack
+    clc
+    adc #2
+    cmp #32
+    bcc :+
+    lda #31
+:   sta pf_r
+    ldy pf_c
+    lda angcol_tbl,y    ; left column - slack
+    sec
+    sbc #2
+    bcs :+
+    lda #0
+:   tay
+@occ:
+    lda ceil_clip,y
+    cmp floor_clip,y
+    bcc @keep           ; open column inside the box's range
+    cpy pf_r
+    iny
+    bcc @occ
+    sec                 ; box fully behind solid columns
+    rts
+@keep:
     clc
     rts
-@cull:
+@pickx:                 ; A = selector: 0 -> x1-1, 1 -> x2+1 (expand outward)
+    bne :+
+    lda bb_x1
     sec
+    sbc #1
     rts
+:   lda bb_x2
+    clc
+    adc #1
+    rts
+@picky:
+    bne :+
+    lda bb_y1
+    sec
+    sbc #1
+    rts
+:   lda bb_y2
+    clc
+    adc #1
+    rts
+
+; silhouette corner selectors per camera region (region 4 = inside, unused)
+bbc_xl: .byte 0, 0, 0, 0, 0, 1, 1, 1, 1
+bbc_yl: .byte 1, 0, 0, 1, 0, 0, 1, 1, 0
+bbc_xr: .byte 1, 1, 1, 0, 0, 1, 0, 0, 0
+bbc_yr: .byte 0, 0, 1, 0, 0, 1, 0, 1, 1
 
 ; ---------------------------------------------------------------------------
 ; node_side: computes the camera's side of node at tptr.

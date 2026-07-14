@@ -39,6 +39,8 @@ mul_b       = $22   ; 16-bit
 mul_r       = $24   ; 32-bit
 mtmp        = $28   ; 4 bytes
 msign       = $2C
+vtmp        = $2D   ; vert_angle: vertex index / cache scratch
+vmask       = $2E
 
 ; --- camera $30-$3F ---
 px          = $30   ; s11.4
@@ -109,6 +111,9 @@ uend        = $A6   ; texture u at right end, 8.8
 tptr        = $A8   ; table pointer (recipf is 1KB, spans pages)
 du88        = $AA
 n0c         = $AC   ; clamped column span
+at_sx       = $AD   ; atan2_hi octant flags: dx sign, dy sign, |dy|>|dx|
+at_sy       = $AE
+at_sw       = $AF
 
 ; --- profiling $80-$8F (lua-visible) ---
 pass_frames = $80
@@ -165,6 +170,7 @@ seg_hc      = $D7   ; sector heights relative to the eye (SIGNED bytes)
 seg_hf      = $D8
 seg_bhc     = $D9
 seg_bhf     = $DA
+pf_r        = $DB   ; angle-prefilter occlusion scan end column (inclusive)
 eye_h       = $DC   ; sec_floor[cam_sec] + EYE_REL, signed
 cam_sec     = $DD
 ss_idx_hi   = $DE   ; 16-bit seg index high byte (ss_idx = $C5 is the low)
@@ -177,12 +183,12 @@ sl_tp_l     = $E4   ; lower wall texture
 sl_bp_l     = $E6
 cur_tp      = $E8
 cur_bp      = $EA
+seg_a1      = $EC   ; angle prefilter: endpoint angles (BAM hi-byte)
+seg_a2      = $ED
+pf_span     = $EE   ; a1 - a2 (mod 256)
+pf_c        = $EF   ; clamped left-endpoint angle index (a1_rel + PF_CLIP)
 dx1         = $F0   ; saved v1 camera-relative deltas (z-first transform)
 dy1         = $F2
-vsin_l      = $F4   ; sin/cos of pang+45deg and pang-45deg (frustum edges)
-vcos_l      = $F6
-vsin_r      = $F8
-vcos_r      = $FA
 dx2         = $FC   ; saved v2 camera-relative deltas
 dy2         = $FE
 

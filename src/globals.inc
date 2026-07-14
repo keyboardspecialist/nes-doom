@@ -28,6 +28,8 @@ NMI_QUOTA = 3
 
 VIEW_ROWS = 20
 VIEW_COLS = 32
+PF_CLIP   = 36      ; angle-gate clip half-angle: 32 (45 deg) + atan slack;
+                    ; must match the angcol_tbl domain in tools/tablegen.py
 
 ; CHR bank layout (must match tools/tilegen.py): 4 banks per texture, then
 ; the flats/status bank (tile 0 ceiling, tile 2 floor, tile 3 checker).

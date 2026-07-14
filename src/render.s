@@ -19,9 +19,9 @@
 .include "mmc5.inc"
 .include "globals.inc"
 
-.import mul16u, mul16s, render_bsp, find_sector
+.import mul16u, mul16s, atan2_hi, render_bsp, find_sector
 .import sin_lo, sin_hi, recipf_lo, recipf_hi
-.import recip_col_lo, recip_col_hi, light_tbl
+.import recip_col_lo, recip_col_hi, light_tbl, angcol_tbl
 .import slice_tile, slice_bank, tex_base_lo, tex_base_hi, tex_ramp
 .import map_verts, sec_floor, sec_ceil, sec_light
 .import ceil_clip, floor_clip
@@ -29,6 +29,11 @@
 .import PX_MIN_H, PX_MAX_H, PY_MIN_H, PY_MAX_H
 .import REJECT_ROWB, reject_tbl
 .export render_frame, init_camera, do_seg
+
+.segment "BSS"
+vang:   .res 256            ; per-vertex view angle (BAM hi-byte), per pass
+vdone:  .res 32             ; bitmap: angle computed this pass
+vnear:  .res 32             ; bitmap: vertex too close for a reliable angle
 
 NEAR    = 256               ; s11.4: 16 world units
 TURN    = 512               ; BAM per pass (~2.8 deg)
@@ -93,6 +98,13 @@ render_frame:
     asl
     asl
     sta rf_backoff
+    ; invalidate the per-vertex angle cache (camera moved)
+    ldy #31
+    lda #0
+:   sta vdone,y
+    sta vnear,y
+    dey
+    bpl :-
     jsr render_bsp
     lda frame_cnt
     sec
@@ -147,39 +159,6 @@ update_cam:
     sta vcos
     lda sin_hi,y
     sta vcos+1
-    ; frustum edge vectors (pang +/- 45deg) for BSP bbox culling
-    lda pang+1
-    clc
-    adc #32
-    tay
-    lda sin_lo,y
-    sta vsin_l
-    lda sin_hi,y
-    sta vsin_l+1
-    tya
-    clc
-    adc #64
-    tay
-    lda sin_lo,y
-    sta vcos_l
-    lda sin_hi,y
-    sta vcos_l+1
-    lda pang+1
-    sec
-    sbc #32
-    tay
-    lda sin_lo,y
-    sta vsin_r
-    lda sin_hi,y
-    sta vsin_r+1
-    tya
-    clc
-    adc #64
-    tay
-    lda sin_lo,y
-    sta vcos_r
-    lda sin_hi,y
-    sta vcos_r+1
     lda joy1
     and #$10            ; Up: forward (step = view dir / 2 = 8 units)
     beq :+
@@ -550,10 +529,96 @@ set_texptrs:
     rts
 
 ; ---------------------------------------------------------------------------
-; do_seg: rasterize one seg from (wall_ptr). Record layout (10 bytes):
-; v1 v2 (vertex indices), ulen (texels), u0, tex, tex_low, front, back
+; vert_angle: X = vertex index (maps are capped at 256 vertices). Returns
+; A = view angle of the vertex (BAM hi-byte) with C clear, or C set when the
+; vertex is too close for a reliable atan. Cached per pass in vang/vdone/
+; vnear so shared seg endpoints cost one atan per frame.
 ; ---------------------------------------------------------------------------
-do_seg:
+vert_angle:
+    stx vtmp
+    txa
+    and #7
+    tay
+    lda va_bit,y
+    sta vmask
+    txa
+    lsr
+    lsr
+    lsr
+    tay
+    lda vdone,y
+    and vmask
+    beq @compute
+    lda vnear,y
+    and vmask
+    bne @near
+    ldx vtmp
+    lda vang,x
+    clc
+    rts
+@near:
+    sec
+    rts
+@compute:
+    lda vdone,y
+    ora vmask
+    sta vdone,y
+    ; rt_dx/rt_dy = vertex - camera (map_verts is 4-byte records)
+    lda #0
+    sta tptr+1
+    lda vtmp
+    asl
+    rol tptr+1
+    asl
+    rol tptr+1
+    clc
+    adc #<map_verts
+    sta tptr
+    lda tptr+1
+    adc #>map_verts
+    sta tptr+1
+    ldy #0
+    lda (tptr),y
+    sec
+    sbc px
+    sta rt_dx
+    iny
+    lda (tptr),y
+    sbc px+1
+    sta rt_dx+1
+    iny
+    lda (tptr),y
+    sec
+    sbc py
+    sta rt_dy
+    iny
+    lda (tptr),y
+    sbc py+1
+    sta rt_dy+1
+    jsr atan2_hi
+    bcs @toonear
+    ldx vtmp
+    sta vang,x
+    clc
+    rts
+@toonear:
+    lda vtmp
+    lsr
+    lsr
+    lsr
+    tay
+    lda vnear,y
+    ora vmask
+    sta vnear,y
+    sec
+    rts
+
+va_bit:
+    .byte $01, $02, $04, $08, $10, $20, $40, $80
+
+; seg_deltas: camera-relative deltas of both endpoints -> dx1/dy1 (v1),
+; rt_dx/rt_dy (v2)
+seg_deltas:
     ldy #0
     jsr fetch_vertex
     jsr sub_cam
@@ -567,8 +632,136 @@ do_seg:
     sta dy1+1
     ldy #2
     jsr fetch_vertex
-    jsr sub_cam         ; rt_dx/rt_dy = v2 deltas from here on
-    ; --- early backface: camera must be on the seg's right (front) side.
+    jmp sub_cam
+
+; ---------------------------------------------------------------------------
+; do_seg: rasterize one seg from (wall_ptr). Record layout (10 bytes):
+; v1 v2 (vertex indices), ulen (texels), u0, tex, tex_low, front, back
+;
+; Angle gate (Doom's R_AddLine): cached per-vertex angles decide backface /
+; off-frustum / fully-occluded before any transform math. Only segs that
+; survive (or whose angles are unreliable) touch the multiplier.
+; ---------------------------------------------------------------------------
+do_seg:
+    ldy #0
+    lda (wall_ptr),y
+    tax
+    jsr vert_angle
+    bcs @gf
+    sta seg_a1
+    ldy #2
+    lda (wall_ptr),y
+    tax
+    jsr vert_angle
+    bcs @gf
+    sta seg_a2
+    lda seg_a1
+    sec
+    sbc seg_a2
+    sta pf_span         ; angular span (mod 256); true front-facing < 128
+    ; +-4 units of atan slack: 133..251 is certain backface; 124..132 is the
+    ; wall-hugging wrap zone (true span ~180deg) where the clip tests below
+    ; are invalid -> exact path. Small spans run the frustum/occlusion tests
+    ; (winding settled by the exact backface test later); tiny negative
+    ; spans normalize order first.
+    cmp #124
+    bcc @pf_ord
+    cmp #133
+    bcc @gf
+    cmp #252
+    bcs @pf_swap
+    rts                 ; certain backface
+@gf:
+    jmp @gate_full      ; angles unreliable -> exact path
+@pf_swap:
+    ; measured span slightly negative (sliver): swap endpoints so a1 is left
+    lda #0
+    sec
+    sbc pf_span
+    sta pf_span
+    ldx seg_a1
+    lda seg_a2
+    sta seg_a1
+    stx seg_a2
+@pf_ord:
+    ; left endpoint: idx1 = (a1 - pang) + PF_CLIP, on-screen in [0, 2*CLIP]
+    lda seg_a1
+    sec
+    sbc pang+1
+    clc
+    adc #PF_CLIP
+    cmp #2*PF_CLIP+1
+    bcc @pf_a1ok
+    ; outside: reject unless the seg wraps back in.
+    ; tspan = idx1 - 2*CLIP; off-screen if tspan - 4 >= span (4 = atan slack)
+    sec
+    sbc #2*PF_CLIP
+    sec
+    sbc #4
+    bcc @pf_a1cl
+    cmp pf_span
+    bcc @pf_a1cl
+    rts                 ; entirely off the left / behind
+@pf_a1cl:
+    lda #2*PF_CLIP      ; clamp to the left frustum edge
+@pf_a1ok:
+    sta pf_c
+    ; right endpoint: idx2 = (a2 - pang) + PF_CLIP
+    lda seg_a2
+    sec
+    sbc pang+1
+    clc
+    adc #PF_CLIP
+    cmp #2*PF_CLIP+1
+    bcc @pf_a2ok
+    ; tspan = -idx2 (mod 256); off-screen if tspan - 4 >= span
+    eor #$FF
+    sec
+    sbc #3              ; (255 - idx2) - 3 = (256 - idx2) - 4
+    bcc @pf_a2cl
+    cmp pf_span
+    bcc @pf_a2cl
+    rts                 ; entirely off the right
+@pf_a2cl:
+    lda #0              ; clamp to the right frustum edge
+@pf_a2ok:
+    tay
+    lda angcol_tbl,y    ; right column + slack
+    clc
+    adc #2
+    cmp #32
+    bcc :+
+    lda #31
+:   sta pf_r
+    ldy pf_c
+    lda angcol_tbl,y    ; left column - slack
+    sec
+    sbc #2
+    bcs :+
+    lda #0
+:   tay
+@pf_occ:
+    lda ceil_clip,y
+    cmp floor_clip,y
+    bcc @pf_open        ; open column -> seg may be visible
+    cpy pf_r
+    iny
+    bcc @pf_occ
+    rts                 ; every reachable column already solid -> skip seg
+@pf_open:
+    ; angle gate passed. Span 5..123 (with +-4 slack) is certainly
+    ; front-facing: skip the exact backface multiplies. Slivers and
+    ; ambiguous spans still get the exact winding test.
+    lda pf_span
+    cmp #5
+    bcc @gate_full
+    cmp #124
+    bcs @gate_full
+    jsr seg_deltas
+    jmp @facing
+@gate_full:
+    jsr seg_deltas      ; rt_dx/rt_dy = v2 deltas from here on
+    ; --- exact backface: camera must be on the seg's right (front) side.
     ; cross = segdy*dx1 - segdx*dy1; reject when >= 0. Two multiplies on raw
     ; deltas — kills back-facing segs before any transform work.
     lda rt_dy
