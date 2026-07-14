@@ -2073,13 +2073,14 @@ emit_edges:
     lda ytop_acc+1
     rol                 ; A = this column's boundary row
     cmp mtmp+2
-    beq @tsame
-    bcc @trose          ; row grew: boundary rises out of this row
+    beq @tsame          ; equality is wrap-safe; direction comes from the
+    lda ytop_step+1     ; step sign (unsigned row compare mis-clamped at
+    bmi @tfell          ; the horizon where the accumulator crosses zero)
+    lda #7              ; boundary rises out of this row
+    bne @tb
+@tfell:
     lda #0
     beq @tb
-@trose:
-    lda #7
-    bne @tb
 @tsame:
     lda mtmp
     lsr
@@ -2132,12 +2133,13 @@ emit_edges:
     rol
     cmp mtmp+2
     beq @bsame
-    bcc @bfell          ; row grew: boundary drops out -> full wall column
+    lda ybot_step+1     ; step sign, wrap-safe (see top boundary)
+    bmi @brise
+    lda #7              ; boundary drops below this row -> full wall
+    bne @bb
+@brise:
     lda #0
     beq @bb
-@bfell:
-    lda #7
-    bne @bb
 @bsame:
     lda mtmp
     lsr

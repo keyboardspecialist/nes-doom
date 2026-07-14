@@ -439,8 +439,34 @@ def convert_wad(wadpath, mapname):
           f"({', '.join(s['name'] + ':' + str(s['max_class']) for s in slots)})")
     slot_of = {s["name"]: i for i, s in enumerate(slots)}
 
+    # unkept textures substitute a kept one with SUFFICIENT class coverage
+    # (a too-short substitute would make the engine request pruned slices),
+    # preferring the longest shared name prefix (BROWNGRN -> BROWN144,
+    # TEKWALL1 -> TEKWALL4, COMPTALL -> COMPUTE2 ...)
+    def _cp(a, b):
+        n = 0
+        while n < min(len(a), len(b)) and a[n] == b[n]:
+            n += 1
+        return n
+
+    subst_of = {}
+    for t in texcount:
+        if t in slot_of:
+            continue
+        req = max_class(texh[t])
+        cands = [(i, s) for i, s in enumerate(slots)
+                 if s["max_class"] >= req]
+        if not cands:
+            top = max(range(len(slots)), key=lambda i: slots[i]["max_class"])
+            cands = [(top, slots[top])]
+        i, s = max(cands, key=lambda e: _cp(t, e[1]["name"]))
+        subst_of[t] = i
+        print(f"  subst {t} -> {s['name']}")
+
     def slot(name):
-        return slot_of.get(name, 0)
+        if name in slot_of:
+            return slot_of[name]
+        return subst_of.get(name, 0)
 
     segs = []
     subsectors = []

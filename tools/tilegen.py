@@ -421,11 +421,17 @@ def slice_banks(strips, max_cls, fixed_flat=None):
             bank += 1                    # each texture starts a fresh bank
         tex_bank0 = bank
         major = max(set(ramps), key=ramps.count)
+        baked = {}                       # (class, phase) -> LUT entry pair
         for ci, h in enumerate(CLASSES):
             if ci > max_cls[ti]:
+                # pruned: unreachable by construction; backstop points at
+                # the texture's own top class (wrong scale beats garbage)
+                mc = max_cls[ti]
                 for p in range(CLASS_PHASES[ci]):
-                    slice_tile.append(0)     # pruned: never requested
-                    slice_bank.append(0)
+                    pm = p * CLASS_PHASES[mc] // CLASS_PHASES[ci]
+                    t, b = baked[(mc, pm)]
+                    slice_tile.append(t)
+                    slice_bank.append(b)
                 continue
             hpx = h * 8
             tw = CLASS_TW[ci]
@@ -456,8 +462,10 @@ def slice_banks(strips, max_cls, fixed_flat=None):
                 if len(banks[bank]) // TILE_BYTES + h > BANK_TILES:
                     bank += 1
                     assert bank < limit, "texture slices overflowed the banks"
-                slice_tile.append(len(banks[bank]) // TILE_BYTES)
-                slice_bank.append(bank | (ramp << 7))
+                entry = (len(banks[bank]) // TILE_BYTES, bank | (ramp << 7))
+                baked[(ci, p)] = entry
+                slice_tile.append(entry[0])
+                slice_bank.append(entry[1])
                 for t in range(h):
                     banks[bank].extend(encode_tile(col[t * 8:(t + 1) * 8]))
     fb = banks[flat_bank]
