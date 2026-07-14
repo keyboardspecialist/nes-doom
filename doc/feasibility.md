@@ -488,6 +488,17 @@ carry palette work:
 Net: 8 effective BG palettes per frame, per-room hue variation, and
 per-frame dynamic palettes (damage flash, light flicker) now free.
 
+**Four-level walls (same session).** Answering "why aren't we using all
+palette entries": wall pixels only used colors 1-3 — but BG color 0 is
+not transparency, it renders the backdrop COLOR, and the backdrop is
+black: a free fourth ramp level. Quantization is now 4 luminance bins
+(25/50/75 percentiles, re-derived per class): bright/mid/dark ramp colors
+plus black for the darkest quartile, dither at all three boundaries.
++33% tonal depth for zero CHR and zero runtime. The remaining "unused"
+entries are the light-pair overlap (light-1 palettes share two rows with
+their bright pair) — that overlap IS the 1-bit runtime dimming mechanism;
+unique colors per wall set are ~8 of 13 by design.
+
 ## Ceiling check: CHR-RAM, and what headroom remains (seventh session)
 
 Asked directly: is the technique maxed out, and would CHR-RAM runtime

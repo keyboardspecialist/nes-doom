@@ -181,13 +181,19 @@ def wad_textures(wadpath, texlist):
         src = [[pal[img[x][y]] for x in range(w)] for y in range(h)]
         rgbmap = box_resample(src, 64, 64)
         lums = sorted(_lum(p) for row in rgbmap for p in row)
-        p33, p66 = lums[len(lums) // 3], lums[(2 * len(lums)) // 3]
-        # brightest -> color 1 (top of the palette ramp), darkest -> 3
+        n = len(lums)
+        thr = (lums[n // 4], lums[n // 2], lums[(3 * n) // 4])
+        # 4 levels: brightest -> color 1, then 2, 3; the darkest quartile
+        # becomes color 0 = the black backdrop entry (BG color 0 is not
+        # transparency, it renders the backdrop COLOR -- a free 4th level).
+        # Hue bins for ramp derivation still come from colors 1-3.
         sums = {1: [0, 0, 0, 0], 2: [0, 0, 0, 0], 3: [0, 0, 0, 0]}
         for row in rgbmap:
             for p in row:
                 lm = _lum(p)
-                c = 1 if lm >= p66 else (2 if lm >= p33 else 3)
+                if lm < thr[0]:
+                    continue
+                c = 1 if lm >= thr[2] else (2 if lm >= thr[1] else 3)
                 s = sums[c]
                 wt = max(p) - min(p) + 1
                 s[0] += p[0] * wt
@@ -197,7 +203,7 @@ def wad_textures(wadpath, texlist):
         out.append(rgbmap)
         tex_bins.append({c: (s[0] / max(s[3], 1), s[1] / max(s[3], 1),
                              s[2] / max(s[3], 1)) for c, s in sums.items()})
-        thresholds.append((p33, p66))
+        thresholds.append(thr)
     return out, tex_bins, thresholds
 
 
@@ -210,44 +216,58 @@ def _lum(p):
     return 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2]
 
 
-def quantize_rows(rgb_rows, p33, p66, dither=True):
-    """Quantize RGB rows to colors 1-3 by the texture's luminance
-    thresholds (keeps relative contrast — raw nearest-RGB matching dies on
-    dark Doom art), with an ordered dither toward the neighboring bin near
-    a threshold. Runs at FINAL resolution so the dither pattern never
-    moires through a rescale."""
-    band = max(4.0, (p66 - p33) * 0.3)
+def quantize_rows(rgb_rows, thr, dither=True):
+    """Quantize RGB rows to FOUR levels by the texture's luminance
+    thresholds (thr = 25/50/75 percentiles): colors 1-3 = the ramp
+    bright/mid/dark, color 0 = the black backdrop entry as the darkest
+    level. Ordered dither toward the neighboring bin near each threshold;
+    runs at FINAL resolution so the pattern never moires through a
+    rescale. (Luminance binning keeps relative contrast — raw nearest-RGB
+    matching dies on dark Doom art.)"""
+    t25, t50, t75 = thr
+    band = max(4.0, (t75 - t25) * 0.15)
+    # bin order dark->bright as palette colors: 0 (black), 3, 2, 1
+    edges = ((t25, 0, 3), (t50, 3, 2), (t75, 2, 1))
     idx = []
     for y, row in enumerate(rgb_rows):
         irow = []
         for x, p in enumerate(row):
             lm = _lum(p)
-            c = 1 if lm >= p66 else (2 if lm >= p33 else 3)
+            if lm >= t75:
+                c = 1
+            elif lm >= t50:
+                c = 2
+            elif lm >= t25:
+                c = 3
+            else:
+                c = 0
             if dither and (x ^ y) & 1:
-                if c == 1 and lm < p66 + band:
-                    c = 2
-                elif c == 2 and lm >= p66 - band:
-                    c = 1
-                elif c == 2 and lm < p33 + band:
-                    c = 3
-                elif c == 3 and lm >= p33 - band:
-                    c = 2
+                for e, lo, hi in edges:
+                    if lo == c and e - band <= lm < e:
+                        c = hi
+                        break
+                    if hi == c and e <= lm < e + band:
+                        c = lo
+                        break
             irow.append(c)
         idx.append(irow)
     return idx
 
 
-def strip_ramp_err(rgb_rows, p33, p66, ramp_rgbs):
+def strip_ramp_err(rgb_rows, thr, ramp_rgbs):
     """Per-ramp fit error of one RGB strip: bin pixels by the texture
     thresholds, then compare each bin's chroma-weighted mean —
     luminance-scaled to the candidate color, the same trick ramp_base
     uses — against the ramp's NES colors."""
+    t25, t50, t75 = thr
     sums = {1: [0.0, 0.0, 0.0, 0.0], 2: [0.0, 0.0, 0.0, 0.0],
             3: [0.0, 0.0, 0.0, 0.0]}
     for row in rgb_rows:
         for p in row:
             lm = _lum(p)
-            c = 1 if lm >= p66 else (2 if lm >= p33 else 3)
+            if lm < t25:
+                continue                # black bin has no hue vote
+            c = 1 if lm >= t75 else (2 if lm >= t50 else 3)
             s = sums[c]
             wt = max(p) - min(p) + 1
             s[0] += p[0] * wt
@@ -279,10 +299,10 @@ def texture_strips_wad(rgb_maps, thresholds, ramp_bases):
     the parent 8-texel strip's ramp."""
     ramp_rgbs = [[NES_PAL[v] for v in base] for base in ramp_bases]
     strips = []
-    for rgbmap, (p33, p66) in zip(rgb_maps, thresholds):
+    for rgbmap, thr in zip(rgb_maps, thresholds):
         rows_of = [[rgbmap[y][p * 8:(p + 1) * 8] for y in range(64)]
                    for p in range(8)]
-        errs = [strip_ramp_err(rows_of[p], p33, p66, ramp_rgbs)
+        errs = [strip_ramp_err(rows_of[p], thr, ramp_rgbs)
                 for p in range(8)]
         major = 0 if sum(e[0] for e in errs) <= sum(e[1] for e in errs) else 1
         ramps = []
@@ -305,14 +325,14 @@ def texture_strips_wad(rgb_maps, thresholds, ramp_bases):
         blocks = [ramps[2 * b] if ramps[2 * b] == ramps[2 * b + 1] else major
                   for b in range(4)]
         ramps = [blocks[p >> 1] for p in range(8)]
-        strips.append(("rgb", rgbmap, ramps, p33, p66))
+        strips.append(("rgb", rgbmap, ramps, thr, None))
     return strips
 
 
 def texture_strips_indexed(index_maps, ramp_of):
     """--game path: textures are already 3-color index maps; every strip
     inherits the texture's ramp and keeps nearest-neighbor rescale."""
-    return [("idx", tex, [ramp_of[ti]] * 8, 0, 0)
+    return [("idx", tex, [ramp_of[ti]] * 8, None, None)
             for ti, tex in enumerate(index_maps)]
 
 
@@ -415,7 +435,7 @@ def slice_banks(strips, max_cls, fixed_flat=None):
     banks = [bytearray() for _ in range(flat_bank + 1)]
     slice_tile, slice_bank = [], []
     bank = 0
-    for ti, (kind, texmap, ramps, p33, p66) in enumerate(strips):
+    for ti, (kind, texmap, ramps, _thr, _unused) in enumerate(strips):
         if fixed_flat is None:
             bank = ti * BANKS_PER_TEX
         limit = flat_bank if fixed_flat is not None \
@@ -450,14 +470,14 @@ def slice_banks(strips, max_cls, fixed_flat=None):
                     scaled.append(box_resample(rows, 8, hpx))
                 lums = sorted(_lum(px) for s in scaled for row in s
                               for px in row)
-                cp33 = lums[len(lums) // 3]
-                cp66 = lums[(2 * len(lums)) // 3]
+                n = len(lums)
+                cthr = (lums[n // 4], lums[n // 2], lums[(3 * n) // 4])
             for p in range(CLASS_PHASES[ci]):
                 # tw <= 16 aligns to the 16-texel ramp blocks; wider (far)
                 # slices span several blocks and take the texture majority
                 ramp = ramps[min(7, p * tw // 8)] if tw <= 16 else major
                 if kind == "rgb":
-                    col = quantize_rows(scaled[p], cp33, cp66)
+                    col = quantize_rows(scaled[p], cthr)
                 else:
                     x0 = p * tw
                     col = [[texmap[y * 64 // hpx][x0 + x * tw // 8]
