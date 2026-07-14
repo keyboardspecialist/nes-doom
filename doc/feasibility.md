@@ -411,6 +411,32 @@ end instead of smearing it evenly (affine's classic swim). The between-
 anchor error is bounded by 8 columns of drift, under one 8-texel phase in
 practice.
 
+**Sub-row texture anchoring (same session).** The biggest remaining
+texture motion was per-column vertical misalignment: each column's texture
+v=0 pinned to its SNAPPED top row, discarding the sub-row fraction (up to
+7px) that the edge tiles already compute (ek_top). Adjacent columns on a
+sloped wall carried up to half a row of relative vertical offset, sliding
+through row boundaries at different times as the camera moved — crawling,
+ragged horizontal texture lines. The texture row offset now rounds by the
+boundary fraction (eob += ek_top>>2 for solid/upper walls; lower walls
+subtract the back-floor fraction bit), and emit_wall_run clamps a possible
+-1 first row. Horizontal features now run continuous across columns.
+What remains is the static class-scale seam: adjacent columns in
+different height classes stretch the texture vertically by different
+factors (worst gap 16->20 = 18%); that is the quantization lattice itself
+and only more classes (CHR cost: class 18 alone = 288 tiles = a bank)
+would reduce it.
+
+**Timing landmine worth recording:** the M3 IRQ-phase assertion is
+ONE-CYCLE sensitive to main-thread composer timing. A per-row branch in
+emit_wall_run (taken vs not) phase-locked ~16% of frames into reading the
+IRQ scanline as 159/198 instead of 160/199 — the mid-frame-blank MMC5
+counter caveat interacting with handler-entry jitter. Emit-path additions
+must be constant-time (the anchor rounding is branchless lsr/adc, plus
+one timing-pad nop in emit_wall_run); if M3 starts failing with "missing
+IRQ phases" after a renderer edit, suspect timing variance, not the IRQ
+code.
+
 ## Profiling harness (notes)
 
 Mesen2's lua `emu.addMemoryCallback(fn, emu.callbackType.exec, addr)`
