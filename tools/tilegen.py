@@ -389,7 +389,7 @@ def derive_palettes(ramp_bases):
     return pals
 
 
-def slice_banks(strips):
+def slice_banks(strips, max_cls, fixed_flat=None):
     """Prescale every (texture, class, phase) column into contiguous tiles.
     strips[ti] = (kind, texmap, ramps[8], p33, p66); the per-strip ramp
     rides bit 7 of the slice_bank byte (banks stay < 64, bits 6-7 free) so
@@ -403,14 +403,30 @@ def slice_banks(strips):
     quantized+dithered at final resolution — nearest decimation turned
     distant classes into noise. 'idx' textures (synthetic --game) keep
     nearest-neighbor rescale."""
-    flat_bank = len(strips) * BANKS_PER_TEX
+    # wad path: variable banks per texture packed sequentially into 0-59
+    # (classes above the texture's max_class are pruned -- unreachable by
+    # construction, since span <= world height and vshift bounds the rest);
+    # game path: fixed BANKS_PER_TEX stride.
+    flat_bank = fixed_flat if fixed_flat is not None \
+        else len(strips) * BANKS_PER_TEX
     banks = [bytearray() for _ in range(flat_bank + 1)]
     slice_tile, slice_bank = [], []
+    bank = 0
     for ti, (kind, texmap, ramps, p33, p66) in enumerate(strips):
-        bank = ti * BANKS_PER_TEX
-        limit = bank + BANKS_PER_TEX
+        if fixed_flat is None:
+            bank = ti * BANKS_PER_TEX
+        limit = flat_bank if fixed_flat is not None \
+            else bank + BANKS_PER_TEX
+        if fixed_flat is not None and ti > 0:
+            bank += 1                    # each texture starts a fresh bank
+        tex_bank0 = bank
         major = max(set(ramps), key=ramps.count)
         for ci, h in enumerate(CLASSES):
+            if ci > max_cls[ti]:
+                for p in range(CLASS_PHASES[ci]):
+                    slice_tile.append(0)     # pruned: never requested
+                    slice_bank.append(0)
+                continue
             hpx = h * 8
             tw = CLASS_TW[ci]
             scaled = []
@@ -559,6 +575,29 @@ def build_hud(wadpath, bg_palettes, hud_bank):
     return tiles, hud_nt, hud_ex
 
 
+def edge_bank():
+    """128 sloped silhouette tiles (bank 62, wad build): boundary height
+    ramps linearly a->b pixels across the tile. Tiles 0-63 = top boundary
+    (wall color 2 rising from the tile bottom, backdrop 0 above -- the
+    backdrop IS the ceiling color); 64-127 = bottom boundary (wall from the
+    tile top, floor color 3 below). Flat a==b cases subsume the old 14
+    per-column edge tiles; the ramp kills the 8px silhouette stairstep."""
+    tiles = []
+    for top in (True, False):
+        for a in range(8):
+            for b in range(8):
+                pix = [[0] * 8 for _ in range(8)]
+                for x in range(8):
+                    k = int(round(a + (b - a) * (x + 0.5) / 8.0))
+                    for y in range(8):
+                        if top:
+                            pix[y][x] = 2 if y >= 8 - k else 0
+                        else:
+                            pix[y][x] = 2 if y < k else 3
+                tiles.append(encode_tile(pix))
+    return tiles
+
+
 def test_chr():
     banks = 72
     data = bytearray(banks * BANK_BYTES)
@@ -599,8 +638,10 @@ def main():
 
     if args.wad:
         texlist = json.load(open(args.texlist))
-        rgb_maps, tex_bins, thresholds = wad_textures(args.wad, texlist)
-        expected_flat = 60      # 12 slots x 5 banks; FLAT_BANK in globals.inc
+        names = [t["name"] for t in texlist]
+        max_cls = [t["max_class"] for t in texlist]
+        rgb_maps, tex_bins, thresholds = wad_textures(args.wad, names)
+        expected_flat = 60      # texture banks 0-59; FLAT_BANK in globals.inc
     elif args.game:
         index_maps = [brick_texture(), stone_texture()]
         # synthetic textures: nominal warm brick / cool stone bins
@@ -619,7 +660,9 @@ def main():
         strips = texture_strips_wad(rgb_maps, thresholds, ramp_bases)
     else:
         strips = texture_strips_indexed(index_maps, ramp_of)
-    data, st, sb, used, flat_bank = slice_banks(strips)
+        max_cls = [len(CLASSES) - 1] * len(strips)
+    data, st, sb, used, flat_bank = slice_banks(
+        strips, max_cls, fixed_flat=60 if args.wad else None)
     # FLAT_BANK is a build-time constant in src/globals.inc — keep them locked
     assert flat_bank <= expected_flat, f"flat bank {flat_bank} > {expected_flat}"
     if flat_bank < expected_flat:   # pad so flats land exactly at expected_flat
@@ -636,6 +679,11 @@ def main():
         data = data + bytes(bank.ljust(BANK_BYTES, b"\0"))
         hud = (hud_nt, hud_ex)
         print(f"HUD: {len(tiles)} unique tiles in bank {flat_bank + 1}")
+        ebank = bytearray()
+        for t in edge_bank():
+            ebank.extend(t)
+        data = data + bytes(ebank.ljust(BANK_BYTES, b"\0"))
+        print(f"edges: 128 sloped tiles in bank {flat_bank + 2}")
     write_luts(args.luts or "assets/build/luts.s", st, sb, len(strips),
                bg_palettes, hud)
     with open(args.out, "wb") as f:

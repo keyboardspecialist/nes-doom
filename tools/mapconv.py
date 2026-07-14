@@ -224,7 +224,8 @@ def build_micro():
 # ------------------------------------------------------------------ WAD map --
 SCALE = 0.4          # world units multiplier (keeps s11.4 deltas in int16)
 EYE_WAD = round(41 * SCALE)
-MAX_TEX = 12         # texture slots (5 CHR banks each, 0-59; flats at 60)
+# texture slots are budget-driven (banks 0-59; flats fixed at 60): see
+# the selection loop in convert_wad
 BYTE_BUDGET = 7900
 
 
@@ -391,18 +392,52 @@ def convert_wad(wadpath, mapname):
             verts.append(key)
         return vmap[key]
 
-    # --- texture slots ---
+    # --- texture slots: budget-driven with per-texture class pruning ---
+    # A wall part's max screen span is bounded by its world height
+    # (span = 16h/z, near clip z = 16 => span_max = h units), so short
+    # textures never reach tall height classes and skip baking them.
     from collections import Counter
+    from tilegen import CLASSES as TG_CLASSES, CLASS_PHASES
     texcount = Counter()
+    texh = {}
     for i in kept_ss:
         for s in ss_segs[i]:
             back_kept = s["back"] is not None and s["back"] in kept
-            names = [s["tex"]] + ([s["texl"]] if back_kept else [])
-            for t in names:
+            ff, fc, _ = m["sectors"][s["front"]]
+            if back_kept:
+                bf, bc, _ = m["sectors"][s["back"]]
+                parts = [(s["tex"], fc - bc), (s["texl"], bf - ff)]
+            else:
+                parts = [(s["tex"], fc - ff)]
+            for t, h in parts:
                 if t and t != "-":
                     texcount[t] += 1
-    slots = [t for t, _ in texcount.most_common(MAX_TEX)]
-    slot_of = {t: i for i, t in enumerate(slots)}
+                    hs = max(1, round(h * SCALE))
+                    texh[t] = max(texh.get(t, 1), hs)
+
+    def max_class(h):
+        span = min(240, h)
+        while span > 20:                 # engine vshift reduction
+            span >>= 1
+        for ci in range(len(TG_CLASSES)):
+            if TG_CLASSES[ci] >= span:
+                return min(ci + 1, len(TG_CLASSES) - 1)   # +1 margin
+        return len(TG_CLASSES) - 1
+
+    def bank_cost(mc):
+        tiles = sum(TG_CLASSES[ci] * CLASS_PHASES[ci] for ci in range(mc + 1))
+        return -(-tiles // 250)          # ceil w/ packing slack
+
+    slots, used_banks = [], 0
+    for t, _ in texcount.most_common():
+        mc = max_class(texh[t])
+        cost = bank_cost(mc)
+        if used_banks + cost <= 60 and len(slots) < 16:
+            slots.append({"name": t, "max_class": mc})
+            used_banks += cost
+    print(f"textures: {len(slots)} slots, ~{used_banks} banks "
+          f"({', '.join(s['name'] + ':' + str(s['max_class']) for s in slots)})")
+    slot_of = {s["name"]: i for i, s in enumerate(slots)}
 
     def slot(name):
         return slot_of.get(name, 0)

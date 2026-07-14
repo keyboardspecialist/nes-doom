@@ -2040,6 +2040,130 @@ set_slice:              ; A = class index -> tile_base, eclh, exbyte
 ; when the boundary was clipped (raw row != clamped row) or out of window.
 ; ---------------------------------------------------------------------------
 emit_edges:
+.ifdef E1M1
+    ; Sloped silhouette tiles (EDGE_BANK): boundary ramps from this
+    ; column's fraction (a = ek) to the next column's (b, from acc+step,
+    ; clamped 7/0 when the boundary exits the row) -- kills the 8px
+    ; stairstep on sloped wall tops/bottoms. Tile = a*8+b (+64 bottom).
+    lda ew_top
+    beq @net
+    lda #10
+    sec
+    sbc vtop
+    cmp t_row
+    bne @net            ; boundary was clip-adjusted -> no edge
+    lda t_row
+    cmp ceil0
+    beq @net            ; no room above inside the clip window
+    bcc @net
+    lda ytop_acc
+    clc
+    adc ytop_step
+    sta mtmp
+    lda ytop_acc+1
+    adc ytop_step+1
+    sta mtmp+1
+    lda mtmp
+    asl
+    lda mtmp+1
+    rol                 ; A = next column's boundary row (acc2 >> 7)
+    sta mtmp+2
+    lda ytop_acc
+    asl
+    lda ytop_acc+1
+    rol                 ; A = this column's boundary row
+    cmp mtmp+2
+    beq @tsame
+    bcc @trose          ; row grew: boundary rises out of this row
+    lda #0
+    beq @tb
+@trose:
+    lda #7
+    bne @tb
+@tsame:
+    lda mtmp
+    lsr
+    lsr
+    lsr
+    lsr
+    and #7
+@tb:
+    sta mtmp+3          ; b
+    ora ek_top
+    beq @net            ; flat empty boundary
+    lda ek_top
+    asl
+    asl
+    asl
+    ora mtmp+3
+    ldy t_row
+    dey
+    sta (dst_nt),y
+    lda exbyte
+    and #$C0
+    ora #EDGE_BANK
+    sta (dst_ex),y
+@net:
+    lda ew_bot
+    beq @neb
+    lda vbot
+    clc
+    adc #10
+    cmp b_row
+    bne @neb
+    lda b_row
+    cmp floor0
+    bcs @neb
+    lda ybot_acc
+    clc
+    adc ybot_step
+    sta mtmp
+    lda ybot_acc+1
+    adc ybot_step+1
+    sta mtmp+1
+    lda mtmp
+    asl
+    lda mtmp+1
+    rol
+    sta mtmp+2
+    lda ybot_acc
+    asl
+    lda ybot_acc+1
+    rol
+    cmp mtmp+2
+    beq @bsame
+    bcc @bfell          ; row grew: boundary drops out -> full wall column
+    lda #0
+    beq @bb
+@bfell:
+    lda #7
+    bne @bb
+@bsame:
+    lda mtmp
+    lsr
+    lsr
+    lsr
+    lsr
+    and #7
+@bb:
+    sta mtmp+3
+    ora ek_bot
+    beq @neb
+    lda ek_bot
+    asl
+    asl
+    asl
+    ora mtmp+3
+    clc
+    adc #64             ; bottom-boundary tile set
+    ldy b_row
+    sta (dst_nt),y
+    lda exbyte
+    and #$C0
+    ora #EDGE_BANK
+    sta (dst_ex),y
+@neb:
+.else
     lda ew_top
     beq @net
     lda ek_top
@@ -2087,6 +2211,7 @@ emit_edges:
     ora #FLAT_BANK
     sta (dst_ex),y
 @neb:
+.endif
     rts
 
 emit_wall_run:          ; rows [ers, ere), NT = tile_base +

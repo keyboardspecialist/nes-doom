@@ -455,6 +455,45 @@ the letterbox blank sits below the bar. Live digit updates need game
 state that does not exist yet; when it does, a digit write is a handful
 of $2007 writes in the NMI/IRQ push windows.
 
+## Ceiling check: CHR-RAM, and what headroom remains (seventh session)
+
+Asked directly: is the technique maxed out, and would CHR-RAM runtime
+geometry beat it? **CHR-RAM framebuffer loses by ~20x**: a full screen is
+10,240 bytes of pattern data against a measured push budget of ~700-800
+bytes/frame (13+ frames per flip), and software pixel rasterization on the
+6502 runs >= 15-20 cycles/pixel = 25-30 frames per render pass — combined
+~1.5 fps against the current 3-30. That wall is why tokumaru pre-rendered
+and Elite shipped PAL-only; writing tile indices instead of pixels is the
+project's entire viability, and the quantization artifacts are that
+trade's price. (A hybrid — runtime-composited boundary tiles in a small
+CHR-RAM window on a custom board — is bandwidth-plausible at ~1KB/frame
+but competes with column pushes and has thin emulator support; the sloped
+edge tiles below buy most of the same effect from ROM.)
+
+Headroom that did remain, both landed this session:
+
+- **Sloped silhouette tiles (bank 62).** Boundary tiles now ramp the wall
+  edge linearly from this column's sub-row fraction to the next column's
+  (128 precomputed tiles: 64 top a->b + 64 bottom, a,b in 0..7; clamped
+  7/0 when the boundary exits the row). The 8px silhouette stairstep on
+  sloped wall tops/bottoms becomes a near-pixel diagonal. Zero bandwidth,
+  ~15 extra cycles per boundary tile. The --game build keeps the old flat
+  edge tiles.
+- **Per-texture height-class pruning.** A wall part's max screen span is
+  bounded by its world height (span = 16h/z, near clip z=16 => span_max =
+  h units), so mapconv tracks each texture's max part height, converts it
+  through the engine's vshift reduction to a max reachable class (+1
+  margin), and texture selection becomes bank-budget-driven. tilegen bakes
+  only reachable classes and packs variable-size textures sequentially
+  into banks 0-59 (flats/HUD/edges stay fixed at 60/61/62). E1M1: **15
+  texture slots** (was 12) in ~58 banks — STEP6 prunes to class 6,
+  BROWN1 to 9.
+
+Still on the table, costed: class 18 (halves the worst vertical rescale
+seam, ~1-2 slots after pruning), dithered floor-shade tiles (cheap), and
+the real frontier — sprites (768KB CHR untouched, separate sprite
+banking).
+
 ## Profiling harness (notes)
 
 Mesen2's lua `emu.addMemoryCallback(fn, emu.callbackType.exec, addr)`

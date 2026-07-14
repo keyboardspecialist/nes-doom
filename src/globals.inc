@@ -35,7 +35,8 @@ PF_CLIP   = 36      ; angle-gate clip half-angle: 32 (45 deg) + atan slack;
 ; (per-class isotropic texel widths, CLASS_TW), then the flats/status
 ; bank (tile 0 ceiling, tile 2 floor, tile 3 checker).
 .ifdef E1M1
-FLAT_BANK = 60      ; 12 WAD textures
+FLAT_BANK = 60      ; WAD textures fill banks 0-59 (variable banks/texture)
+EDGE_BANK = 62      ; 128 sloped silhouette tiles (HUD sits at 61)
 .else
 FLAT_BANK = 10      ; 2 synthetic textures
 .endif
