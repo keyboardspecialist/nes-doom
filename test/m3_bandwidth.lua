@@ -9,6 +9,12 @@ local frames = 0
 local irqLines = {}
 local blankLines = {}
 local statusA = nil
+local pushSeen = 0
+local pushBad = nil
+local pushOrder = {
+  0, 16, 8, 24, 4, 20, 12, 28, 2, 18, 10, 26, 6, 22, 14, 30,
+  1, 17, 9, 25, 5, 21, 13, 29, 3, 19, 11, 27, 7, 23, 15, 31,
+}
 
 local function fail(msg)
   print("M3 FAIL: " .. msg)
@@ -31,6 +37,28 @@ local haveMemCb = pcall(function()
       blankLines[#blankLines + 1] = s["ppu.scanline"]
     end
   end, emu.callbackType.write, 0x2001)
+end)
+
+-- Every bank-top schedule slot must dispatch to the intended physical column.
+local ppuAddrHigh = false
+pcall(function()
+  emu.addMemoryCallback(function(addr, value)
+    local mt = emu.memType.nesDebug
+    if emu.read(0x18, mt) == 0 then
+      ppuAddrHigh = false
+      return
+    end
+    if value == 0x20 then
+      ppuAddrHigh = true
+    elseif ppuAddrHigh then
+      local slot = emu.read(0x11, mt)
+      if slot < 32 and value ~= pushOrder[slot + 1] then
+        pushBad = string.format("slot %d pushed column %d", slot, value)
+      end
+      pushSeen = pushSeen + 1
+      ppuAddrHigh = false
+    end
+  end, emu.callbackType.write, 0x2006)
 end)
 
 local function px(buf, x, y)
@@ -57,6 +85,8 @@ emu.addEventCallback(function()
     flips, frames, frames / math.max(flips, 1), flips * 60 / frames))
 
   if canary ~= 0xC5 then return fail("ZP canary clobbered") end
+  if pushBad then return fail("push schedule mismatch: " .. pushBad) end
+  if pushSeen < 100 then return fail("push schedule was not observed") end
   -- Pusher-only ceiling measured at 241 flips/600 (2.49 frames/flip) with a
   -- 1-frame composer (2026-07-13); M4 composer: 199/600 (3.03). The pipeline
   -- is composer-bound now, so this guards "not wedged / meets the 8 fps
@@ -67,10 +97,19 @@ emu.addEventCallback(function()
   -- IRQ phases
   local at160, at199 = 0, 0
   for _, l in ipairs(irqLines) do
-    if l >= 160 and l <= 161 then at160 = at160 + 1 end
-    if l >= 199 and l <= 200 then at199 = at199 + 1 end
+    -- Mesen can report the assertion on the preceding scanline depending on
+    -- the main-thread cycle phase; the actual blank write is checked below.
+    if l >= 159 and l <= 161 then at160 = at160 + 1 end
+    if l >= 198 and l <= 200 then at199 = at199 + 1 end
   end
   print(string.format("irq events: %d total, %d @160, %d @199", #irqLines, at160, at199))
+  if at160 < 550 or at199 < 550 then
+    local hist = {}
+    for _, l in ipairs(irqLines) do hist[l] = (hist[l] or 0) + 1 end
+    for l = 158, 204 do
+      if hist[l] then print(string.format("  irq line %d: %d", l, hist[l])) end
+    end
+  end
   if at160 < 550 or at199 < 550 then return fail("missing IRQ phases") end
 
   -- $2001 blank timing

@@ -16,3 +16,5 @@ Icon\r
 *.dbg
 *.bin
 *.o
+__pycache__/
+*.pyc

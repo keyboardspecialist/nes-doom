@@ -93,8 +93,8 @@ irq_handler:
     sta $2006
     lda ppu2000_sh
     sta $2000
-    lda ppu2001_sh
-    sta $2001           ; rendering back on
+    lda #STATUS_MASK
+    sta $2001           ; HUD uses BG only; weapon ends at line 159
     pla
     tax
     ; the mid-frame blank cleared MMC5 in-frame detection; the counter
@@ -134,11 +134,15 @@ irq_handler:
     sta $2001           ; letterbox begins
     lda #EXRAM_MODE_RAM
     sta MMC5_EXRAM_MODE
-    lda #%10001100      ; inc-32 for column pushes
+    ; Keep NMI out of the transient PRG-bank/ExRAM state inside push_run.  If
+    ; this ever reaches vblank, setting bit 7 again below triggers NMI then.
+    lda #%00001100      ; NMI off, inc-32 for column pushes
     sta $2000
     lda #IRQ_QUOTA
     sta push_quota
     jsr push_run
+    lda #%10001100      ; NMI on, preserve inc-32 until the handler restores it
+    sta $2000
     pla
     tay
     pla

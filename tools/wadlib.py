@@ -4,7 +4,8 @@ import struct
 
 class Wad:
     def __init__(self, path):
-        self.data = open(path, "rb").read()
+        with open(path, "rb") as source:
+            self.data = source.read()
         ident, n, diroff = struct.unpack_from("<4sII", self.data, 0)
         assert ident in (b"IWAD", b"PWAD"), "not a WAD"
         self.dir = []
@@ -95,6 +96,23 @@ def _draw_picture(wad, name, img, w, h, ox, oy):
                     img[dx][y] = d[p + 3 + i]
             p += 4 + length
     return
+
+
+def decode_picture(wad, name):
+    """Decode a Doom picture lump to row-major palette indices or None."""
+    d = wad.lump(name)
+    width, height, left, top = struct.unpack_from("<hhhh", d, 0)
+    pixels = [[None] * width for _ in range(height)]
+    for x in range(width):
+        pos = struct.unpack_from("<I", d, 8 + 4 * x)[0]
+        while d[pos] != 0xFF:
+            y0, length = d[pos], d[pos + 1]
+            for i in range(length):
+                y = y0 + i
+                if y < height:
+                    pixels[y][x] = d[pos + 3 + i]
+            pos += 4 + length
+    return width, height, left, top, pixels
 
 
 def compose_texture(wad, texdefs, pnames, name):

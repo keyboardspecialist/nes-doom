@@ -8,7 +8,9 @@
 .include "mmc5.inc"
 
 .import recipf_lo, atan_tbl, recip_col_lo, recip_col_hi
-.export mul16u, mul16s, atan2_hi, atan2_pg
+.export mul16u, mul16s, mul16s9, mul16s8u
+.export mul8u16u, mul8s16u, mul8s16s, mul16s16u
+.export atan2_hi, atan2_pg
 
 .segment "CODE"
 
@@ -85,6 +87,192 @@ mul16s:
     sbc mul_r+3
     sta mul_r+3
 :   rts
+
+; Signed 16 x unsigned 8.  Two MMC5 partials, then correct the unsigned
+; interpretation when A is negative.  mul_b+1 is ignored.
+mul16s8u:
+    lda mul_a
+    sta MMC5_MULT_A
+    lda mul_b
+    sta MMC5_MULT_B
+    lda MMC5_MULT_A
+    sta mul_r
+    lda MMC5_MULT_B
+    sta mul_r+1
+    lda mul_a+1
+    sta MMC5_MULT_A
+    lda MMC5_MULT_A
+    clc
+    adc mul_r+1
+    sta mul_r+1
+    lda MMC5_MULT_B
+    adc #0
+    sta mul_r+2
+    lda #0
+    sta mul_r+3
+    lda mul_a+1
+    bpl :+
+    lda mul_r+2          ; unsigned(A)*B - (B<<16)
+    sec
+    sbc mul_b
+    sta mul_r+2
+    lda mul_r+3
+    sbc #0
+    sta mul_r+3
+:   rts
+
+; Signed 16 x unsigned 16.  Reuse the four-part core and correct negative A.
+mul16s16u:
+    jsr mul16u
+    lda mul_a+1
+    bpl :+
+    lda mul_r+2          ; unsigned(A)*B - (B<<16)
+    sec
+    sbc mul_b
+    sta mul_r+2
+    lda mul_r+3
+    sbc mul_b+1
+    sta mul_r+3
+:   rts
+
+; Unsigned low byte of A x unsigned B16.  Internal 24-bit core.
+mul8u16u:
+    lda mul_a
+    sta MMC5_MULT_A
+    lda mul_b
+    sta MMC5_MULT_B
+    lda MMC5_MULT_A
+    sta mul_r
+    lda MMC5_MULT_B
+    sta mul_r+1
+    lda mul_b+1
+    sta MMC5_MULT_B
+    lda MMC5_MULT_A
+    clc
+    adc mul_r+1
+    sta mul_r+1
+    lda MMC5_MULT_B
+    adc #0
+    sta mul_r+2
+    lda #0
+    sta mul_r+3
+    rts
+
+; Signed 8 x unsigned 16.  The signed byte is in mul_a low.
+mul8s16u:
+    jsr mul8u16u
+    lda mul_a
+    bpl :+
+    lda mul_r+1          ; unsigned(A8)*B - (B<<8)
+    sec
+    sbc mul_b
+    sta mul_r+1
+    lda mul_r+2
+    sbc mul_b+1
+    sta mul_r+2
+    lda mul_r+3
+    sbc #0
+    sta mul_r+3
+:   rts
+
+; Signed 8 x signed 16.  Correct both unsigned operand interpretations.
+mul8s16s:
+    jsr mul8u16u
+    lda mul_a
+    bpl :+
+    lda mul_r+1
+    sec
+    sbc mul_b
+    sta mul_r+1
+    lda mul_r+2
+    sbc mul_b+1
+    sta mul_r+2
+    lda mul_r+3
+    sbc #0
+    sta mul_r+3
+:   lda mul_b+1
+    bpl @s16done
+    lda mul_r+2          ; subtract unsigned(A8)<<16
+    sec
+    sbc mul_a
+    sta mul_r+2
+    lda mul_r+3
+    sbc #0
+    sta mul_r+3
+    lda mul_a
+    bpl @s16done
+    inc mul_r+3          ; both negative: restore the +2^24 cross term
+@s16done:
+    rts
+
+; Signed 16 x signed 9 trig factor (-256..+256).  Cardinal values use exact
+; zero/shift paths; intermediate factors use the signed16 x unsigned8 core.
+mul16s9:
+    lda mul_b+1
+    beq @positive8
+    cmp #1
+    beq @plus256
+    ; Negative table values are $FF01..$FFFF and $FF00 (-256).
+    lda mul_b
+    beq @minus256
+    eor #$FF
+    clc
+    adc #1
+    sta mul_b
+    jsr mul16s8u
+    jmp neg_r
+@positive8:
+    lda mul_b
+    beq zero_r
+    jmp mul16s8u
+@plus256:
+    lda mul_b
+    beq :+
+    jmp mul16s           ; defensive fallback outside the trig-table domain
+:
+    jsr shift8_r
+    rts
+@minus256:
+    jsr shift8_r
+    jmp neg_r
+
+zero_r:
+    lda #0
+    sta mul_r
+    sta mul_r+1
+    sta mul_r+2
+    sta mul_r+3
+    rts
+
+shift8_r:
+    lda #0
+    sta mul_r
+    lda mul_a
+    sta mul_r+1
+    lda mul_a+1
+    sta mul_r+2
+    bpl :+
+    lda #$FF
+    bne :++
+:   lda #0
+:   sta mul_r+3
+    rts
+
+neg_r:
+    sec
+    lda #0
+    sbc mul_r
+    sta mul_r
+    lda #0
+    sbc mul_r+1
+    sta mul_r+1
+    lda #0
+    sbc mul_r+2
+    sta mul_r+2
+    lda #0
+    sbc mul_r+3
+    sta mul_r+3
+    rts
 
 ; ---------------------------------------------------------------------------
 ; atan2_hi: angle of (rt_dx, rt_dy) in BAM high-byte units (256 per circle,

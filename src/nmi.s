@@ -1,8 +1,9 @@
 ; NMI (scanline 241).
-; M3+: OAM DMA first (sprites decay during the 33-line letterbox, so refresh
-; immediately), then the vblank share of the band pusher, then full register
-; restore. Budget: entry ~50 + DMA 514 + 4 columns ~1500 + restore ~120
-; ≈ 2200 of the 2273-cycle vblank.
+; M3+: vblank share of the band pusher, then full register restore. E1M1 also
+; refreshes static weapon OAM because the long letterbox blank stops OAM DRAM
+; refresh long enough to risk decay on hardware.
+; E1M1 pushes two columns because it also installs a buffered wall palette;
+; the micro-map pushes three.
 ; The scanline IRQ must be re-armed here every frame: MMC5 in-frame detection
 ; stops while rendering is disabled, so after the letterbox the NMI is the
 ; only guaranteed wake-up.
@@ -11,6 +12,9 @@
 .include "globals.inc"
 
 .import push_run
+.ifdef E1M1
+.import sec_pal
+.endif
 .export nmi_handler
 
 .segment "FIXED"
@@ -24,8 +28,14 @@ nmi_handler:
 
     inc frame_cnt
 
-    lda #$02            ; OAM shadow page
+.ifdef E1M1
+    ; OAM is dynamic RAM and the long letterbox blank exceeds safe retention.
+    ; Refresh the unchanged static weapon page once per frame.
+    lda #0
+    sta $2003
+    lda #$02
     sta $4014
+.endif
 
 .ifndef M2DEMO
     ; vblank push window — but only if we didn't interrupt a push already in
@@ -46,8 +56,22 @@ nmi_handler:
 .endif
 
 .ifdef E1M1
-    ; load the camera sector's wall palette set (also restores from the
-    ; HUD set the line-160 split swapped in). Rendering is still blanked.
+    ; Resolve the palette owned by the last fully displayed frame.  This also
+    ; restores from the HUD set installed by the line-160 split.
+    lda #0
+    sta pal_ptr+1
+    lda pal_sec
+    sta pal_active
+    .repeat 4
+    asl
+    rol pal_ptr+1
+    .endrepeat
+    clc
+    adc #<sec_pal
+    sta pal_ptr
+    lda pal_ptr+1
+    adc #>sec_pal
+    sta pal_ptr+1
     lda #%10001000      ; increment-1 for palette writes
     sta $2000
     bit $2002

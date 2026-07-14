@@ -3,6 +3,7 @@ LD65  := ld65
 PY    := python3
 MESEN := /Applications/Mesen.app/Contents/MacOS/Mesen
 WAD   := Doom1.WAD
+export PYTHONDONTWRITEBYTECODE := 1
 
 ROM      := nesdoom.nes
 ROM_M2   := nesdoom-m2.nes
@@ -14,7 +15,7 @@ OBJSM2 := $(addprefix obj-m2/,$(addsuffix .o,$(SRCS) $(GENS)))
 OBJSE1 := $(addprefix obj-e1m1/,$(addsuffix .o,$(SRCS) $(GENS)))
 INCS   := src/zeropage.inc src/mmc5.inc src/globals.inc
 
-.PHONY: all clean test test-m1 test-m2 test-m3 test-m4 test-m5 test-e1m1
+.PHONY: all clean test test-python test-m1 test-m2 test-m3 test-m4 test-m5 test-m6 test-e1m1
 
 all: $(ROM) $(ROM_M2)
 
@@ -74,14 +75,21 @@ assets/build/map.s: tools/mapconv.py | assets/build
 assets/build/e1m1-map.s assets/build/texlist.json: tools/mapconv.py tools/wadlib.py $(WAD) | assets/build
 	$(PY) tools/mapconv.py --wad $(WAD) --map E1M1 --texlist assets/build/texlist.json -o assets/build/e1m1-map.s
 
-assets/build/chr-e1m1.bin assets/build/e1m1-luts.s: tools/tilegen.py tools/wadlib.py assets/build/texlist.json
+assets/build/chr-e1m1.bin assets/build/e1m1-luts.s: tools/tilegen.py tools/wadlib.py assets/build/texlist.json $(WAD)
 	$(PY) tools/tilegen.py --wad $(WAD) --texlist assets/build/texlist.json \
 	    -o assets/build/chr-e1m1.bin --luts assets/build/e1m1-luts.s
 
 assets/build:
 	mkdir -p assets/build
 
-test: test-m1 test-m2 test-m3 test-m4 test-m5
+test: test-python test-m1 test-m2 test-m3 test-m4 test-m5
+
+ifneq ($(wildcard $(WAD)),)
+test: test-e1m1 test-m6
+endif
+
+test-python:
+	PYTHONDONTWRITEBYTECODE=1 $(PY) -m unittest discover -s test -p 'test_*.py'
 
 test-m1: $(ROM_M2)
 	sh test/run_mesen.sh $(ROM_M2) test/m1_boot.lua
@@ -100,6 +108,9 @@ test-m5: $(ROM)
 
 test-e1m1: $(ROM_E1M1)
 	sh test/run_mesen.sh $(ROM_E1M1) test/e1m1.lua
+
+test-m6: $(ROM_E1M1)
+	sh test/run_mesen.sh $(ROM_E1M1) test/m6_weapon.lua
 
 clean:
 	rm -rf obj obj-m2 obj-e1m1 assets/build \

@@ -3,14 +3,14 @@
 
 --test mode (M1/M2): hand-built diagnostic banks (see test_chr below).
 
---game mode (M4/M5): 2 synthetic textures (brick, stone) -> banks 0-9,
-  flats/status at bank 10.
+--game mode (M4/M5): 2 synthetic textures (brick, stone) -> banks 0-11,
+  flats/status at bank 12.
 
 --wad WAD --texlist texlist.json (E1M1): compose each named texture from the
   WAD, palette-aware quantization per 8px strip (luminance bins, per-strip
   ramp choice, ordered dither; the ramp bit rides slice_bank bit 7), same
-  slice pipeline -> 5 banks per texture (per-class isotropic texel widths,
-  CLASS_TW), flats at bank 5*ntex.
+  variable-bank slice pipeline (per-class isotropic texel widths, CLASS_TW),
+  flats fixed at bank 60.
 
 Slices: per (texture, height class, u-phase), an 8-px-wide column of the
 64x64 source rescaled to H tiles, contiguous within one 4KB bank. LUT output
@@ -44,15 +44,15 @@ NES_PAL = [
 TILE_BYTES = 16
 BANK_TILES = 256          # 4KB bank
 BANK_BYTES = BANK_TILES * TILE_BYTES
-CLASSES = [1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20]
+CLASSES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16, 20]
 # Per-class texel width per 8px column (power of 2 nearest 64/h): matches
 # the class's vertical scale, so textures stay isotropic at every distance.
 # Wide (minified) slices for far classes are box-filtered at bake time —
 # proper mips, so distant walls no longer phase-crawl; narrow (magnified)
 # slices for near classes stop the column-frequency repetition.
-CLASS_TW = [64, 32, 32, 16, 16, 16, 16, 8, 8, 4, 4, 4, 4]
+CLASS_TW = [64, 32, 32, 16, 16, 16, 16, 8, 8, 8, 4, 4, 4, 4]
 CLASS_PHASES = [64 // tw for tw in CLASS_TW]
-BANKS_PER_TEX = 5
+BANKS_PER_TEX = 6
 SLICES_PER_TEX = sum(CLASS_PHASES)
 
 
@@ -164,8 +164,9 @@ def box_resample(rgb, w_dst, h_dst):
 
 
 def wad_textures(wadpath, texlist):
-    """Compose each named texture, box-filter to a 64x64 RGB map (area
-    average — point sampling aliased thin details away), plus the
+    """Compose each named texture, repeat narrow sources at their native
+    horizontal period, then box-filter to a 64x64 RGB map (area average —
+    point sampling aliased thin details away), plus the
     luminance-binned chroma-weighted bin RGB per texture (drives ramp
     derivation, so colorful pixels outvote gray mortar/shadows)."""
     import wadlib
@@ -176,10 +177,16 @@ def wad_textures(wadpath, texlist):
     out = []
     tex_bins = []
     thresholds = []
+    native_heights = []
     for name in texlist:
         w, h, img = wadlib.compose_texture(wad, defs, pnames, name)
         src = [[pal[img[x][y]] for x in range(w)] for y in range(h)]
-        rgbmap = box_resample(src, 64, 64)
+        if w < 64:
+            # The runtime wraps u every 64 units.  Repeating an 8/32-wide Doom
+            # trim inside that period preserves its native scale; stretching
+            # it to 64 made door tracks and light strips several times wider.
+            src = [[row[x % w] for x in range(64)] for row in src]
+        rgbmap = box_resample(src, 64, h)
         lums = sorted(_lum(p) for row in rgbmap for p in row)
         n = len(lums)
         thr = (lums[n // 4], lums[n // 2], lums[(3 * n) // 4])
@@ -204,7 +211,8 @@ def wad_textures(wadpath, texlist):
         tex_bins.append({c: (s[0] / max(s[3], 1), s[1] / max(s[3], 1),
                              s[2] / max(s[3], 1)) for c, s in sums.items()})
         thresholds.append(thr)
-    return out, tex_bins, thresholds
+        native_heights.append(h)
+    return out, tex_bins, thresholds, native_heights
 
 
 def _wdist(a, b):
@@ -254,6 +262,88 @@ def quantize_rows(rgb_rows, thr, dither=True):
     return idx
 
 
+def projected_half_phase(phase, class_height):
+    """Reference model for the renderer's selective half-row phase math."""
+    q = ((phase * class_height + 64) % (class_height * 256)) // 128
+    return q >> 1, q & 1
+
+
+WEAPON_PALETTE = [0x0F, 0x00, 0x08, 0x27]
+
+
+def build_weapon(wadpath):
+    """Bake PISGA0 to a centered 48x64 8x8-sprite overlay."""
+    try:
+        import wadlib
+    except ModuleNotFoundError:
+        from tools import wadlib
+    wad = wadlib.Wad(wadpath)
+    palette = wadlib.playpal(wad)
+    src_w, src_h, _left, _top, source = wadlib.decode_picture(wad, "PISGA0")
+    assert (src_w, src_h) == (57, 62)
+    scaled_w = (src_w * 4 + 2) // 5
+    assert scaled_w == 46
+
+    scaled = [[None] * scaled_w for _ in range(src_h)]
+    for y in range(src_h):
+        for dx in range(scaled_w):
+            start = dx * src_w / scaled_w
+            end = (dx + 1) * src_w / scaled_w
+            opaque = 0.0
+            rgb = [0.0, 0.0, 0.0]
+            sx0 = dx * src_w // scaled_w
+            sx1 = ((dx + 1) * src_w + scaled_w - 1) // scaled_w
+            for sx in range(sx0, sx1):
+                weight = max(0.0, min(end, sx + 1) - max(start, sx))
+                index = source[y][sx]
+                if index is None or weight == 0:
+                    continue
+                opaque += weight
+                color = palette[index]
+                for k in range(3):
+                    rgb[k] += color[k] * weight
+            if opaque < (end - start) * 0.5:
+                continue
+            scaled[y][dx] = tuple(value / opaque for value in rgb)
+
+    canvas = [[0] * 48 for _ in range(64)]
+    choices = [NES_PAL[index] for index in WEAPON_PALETTE[1:]]
+    for y in range(src_h):
+        for x in range(scaled_w):
+            color = scaled[y][x]
+            if color is None:
+                continue
+            canvas[y + 2][x + 1] = 1 + min(
+                range(3), key=lambda i: _wdist(color, choices[i]))
+
+    tiles = []
+    tile_ids = {}
+    oam = []
+    scanline_counts = [0] * 160
+    for ty in range(8):
+        for tx in range(6):
+            pixels = [row[tx * 8:(tx + 1) * 8]
+                      for row in canvas[ty * 8:(ty + 1) * 8]]
+            encoded = encode_tile(pixels)
+            if not any(encoded):
+                continue
+            if encoded not in tile_ids:
+                tile_ids[encoded] = len(tiles)
+                tiles.append(encoded)
+            screen_y = 96 + ty * 8
+            oam.extend([screen_y - 1, tile_ids[encoded], 0, 104 + tx * 8])
+            for y in range(screen_y, screen_y + 8):
+                scanline_counts[y] += 1
+
+    assert len(oam) == 36 * 4
+    assert len(tiles) <= 64
+    assert max(scanline_counts) <= 8
+    bank = bytearray()
+    for tile in tiles:
+        bank.extend(tile)
+    return bytes(bank.ljust(BANK_BYTES, b"\0")), oam
+
+
 def strip_ramp_err(rgb_rows, thr, ramp_rgbs):
     """Per-ramp fit error of one RGB strip: bin pixels by the texture
     thresholds, then compare each bin's chroma-weighted mean —
@@ -289,7 +379,7 @@ def strip_ramp_err(rgb_rows, thr, ramp_rgbs):
     return errs
 
 
-def texture_strips_wad(rgb_maps, thresholds, ramp_bases):
+def texture_strips_wad(rgb_maps, thresholds, ramp_bases, ramp_of):
     """-> strips[ti] = ('rgb', rgbmap 64x64, ramps[8], p33, p66).
     Ramp coherence: the texture's majority ramp wins unless a strip prefers
     the other ramp by a wide margin (< 0.55x error), then a neighbor pass
@@ -299,12 +389,17 @@ def texture_strips_wad(rgb_maps, thresholds, ramp_bases):
     the parent 8-texel strip's ramp."""
     ramp_rgbs = [[NES_PAL[v] for v in base] for base in ramp_bases]
     strips = []
-    for rgbmap, thr in zip(rgb_maps, thresholds):
-        rows_of = [[rgbmap[y][p * 8:(p + 1) * 8] for y in range(64)]
+    for ti, (rgbmap, thr) in enumerate(zip(rgb_maps, thresholds)):
+        rows_of = [[rgbmap[y][p * 8:(p + 1) * 8]
+                    for y in range(len(rgbmap))]
                    for p in range(8)]
         errs = [strip_ramp_err(rows_of[p], thr, ramp_rgbs)
                 for p in range(8)]
-        major = 0 if sum(e[0] for e in errs) <= sum(e[1] for e in errs) else 1
+        # Preserve the texture-level warm/cool clustering.  Let only strongly
+        # distinct strips switch ramp; choosing the majority solely by total
+        # strip error turned STARTAN's tan frame gray because its broad silver
+        # center outweighed the material identity of the texture.
+        major = ramp_of[ti]
         ramps = []
         for p in range(8):
             ramp = major
@@ -325,7 +420,28 @@ def texture_strips_wad(rgb_maps, thresholds, ramp_bases):
         blocks = [ramps[2 * b] if ramps[2 * b] == ramps[2 * b + 1] else major
                   for b in range(4)]
         ramps = [blocks[p >> 1] for p in range(8)]
-        strips.append(("rgb", rgbmap, ramps, thr, None))
+        # Preserve the bins that actually selected each baked ramp.  Sector
+        # palettes must keep this assignment stable; independently splitting
+        # a room's textures can otherwise reinterpret bit 7 and recolor walls.
+        sums = [{c: [0.0, 0.0, 0.0, 0.0] for c in (1, 2, 3)}
+                for _ in range(2)]
+        t25, t50, t75 = thr
+        for y, row in enumerate(rgbmap):
+            for x, px in enumerate(row):
+                lm = _lum(px)
+                if lm < t25:
+                    continue
+                c = 1 if lm >= t75 else (2 if lm >= t50 else 3)
+                s = sums[ramps[x >> 3]][c]
+                wt = max(px) - min(px) + 1
+                s[0] += px[0] * wt
+                s[1] += px[1] * wt
+                s[2] += px[2] * wt
+                s[3] += wt
+        ramp_bins = []
+        for rs in sums:
+            ramp_bins.append({c: tuple(v) for c, v in rs.items()})
+        strips.append(("rgb", rgbmap, ramps, thr, ramp_bins))
     return strips
 
 
@@ -367,7 +483,8 @@ BACKDROP = 0x0F     # ceiling color (black): ceilings are BLANK tiles showing
 
 
 def ramp_base(bins):
-    """bins {1: rgb, 2: rgb, 3: rgb} -> 3 NES colors at fixed rows 3/2/1.
+    """bins {1: rgb[w], 2: rgb[w], 3: rgb[w]} -> 3 NES colors at fixed
+    rows 3/2/1.  An optional fourth component weights the hue fit.
 
     Doom textures are dark overall, so raw nearest-color matching lands in
     NES row 0 and the light ramp dies. Instead: pin the bins to fixed rows
@@ -381,13 +498,14 @@ def ramp_base(bins):
         d = 0.0
         for c in (1, 2, 3):
             rgb = bins[c]
+            weight = rgb[3] if len(rgb) > 3 else 1.0
             lum = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
             nes = NES_PAL[(rows[c] << 4) | col]
             nlum = 0.299 * nes[0] + 0.587 * nes[1] + 0.114 * nes[2]
             s = nlum / max(lum, 1.0)
-            d += (0.3 * (rgb[0] * s - nes[0]) ** 2
-                  + 0.59 * (rgb[1] * s - nes[1]) ** 2
-                  + 0.11 * (rgb[2] * s - nes[2]) ** 2)
+            d += weight * (0.3 * (rgb[0] * s - nes[0]) ** 2
+                           + 0.59 * (rgb[1] * s - nes[1]) ** 2
+                           + 0.11 * (rgb[2] * s - nes[2]) ** 2)
         if d < bd:
             best_col, bd = col, d
     base = [(rows[c] << 4) | best_col for c in (1, 2, 3)]
@@ -434,6 +552,8 @@ def slice_banks(strips, max_cls, fixed_flat=None):
         else len(strips) * BANKS_PER_TEX
     banks = [bytearray() for _ in range(flat_bank + 1)]
     slice_tile, slice_bank = [], []
+    variants = []
+    vhalf = {}
     bank = 0
     for ti, (kind, texmap, ramps, _thr, _unused) in enumerate(strips):
         if fixed_flat is None:
@@ -466,7 +586,8 @@ def slice_banks(strips, max_cls, fixed_flat=None):
                 # texture-global thresholds would classify everything into
                 # the mid bin (distant walls went flat)
                 for p in range(CLASS_PHASES[ci]):
-                    rows = [texmap[y][p * tw:(p + 1) * tw] for y in range(64)]
+                    rows = [texmap[y][p * tw:(p + 1) * tw]
+                            for y in range(len(texmap))]
                     scaled.append(box_resample(rows, 8, hpx))
                 lums = sorted(_lum(px) for s in scaled for row in s
                               for px in row)
@@ -480,8 +601,13 @@ def slice_banks(strips, max_cls, fixed_flat=None):
                     col = quantize_rows(scaled[p], cthr)
                 else:
                     x0 = p * tw
-                    col = [[texmap[y * 64 // hpx][x0 + x * tw // 8]
+                    col = [[texmap[y * len(texmap) // hpx][x0 + x * tw // 8]
                             for x in range(8)] for y in range(hpx)]
+                if fixed_flat == 60 and (ci == 10 or
+                                         (ci == 11 and ti in {0, 2, 3, 4, 5, 6, 7})):
+                    # Circular half-row shift over the complete class column,
+                    # not within each tile, so adjacent rows remain seamless.
+                    variants.append((ti, ci, p, h, ramp, col[4:] + col[:4]))
                 if len(banks[bank]) // TILE_BYTES + h > BANK_TILES:
                     bank += 1
                     assert bank < limit, "texture slices overflowed the banks"
@@ -491,6 +617,21 @@ def slice_banks(strips, max_cls, fixed_flat=None):
                 slice_bank.append(entry[1])
                 for t in range(h):
                     banks[bank].extend(encode_tile(col[t * 8:(t + 1) * 8]))
+
+    if variants:
+        highest_regular = max(i for i, data in enumerate(banks[:flat_bank]) if data)
+        assert highest_regular <= 42, "regular textures overlap V-half banks"
+        bank = 43
+        for ti, ci, phase, h, ramp, col in variants:
+            if len(banks[bank]) // TILE_BYTES + h > BANK_TILES:
+                bank += 1
+            assert bank < flat_bank, "V-half variants overflow texture banks"
+            entry = (len(banks[bank]) // TILE_BYTES, bank | (ramp << 7))
+            vhalf.setdefault((ci, ti), []).append(entry)
+            for t in range(h):
+                banks[bank].extend(encode_tile(col[t * 8:(t + 1) * 8]))
+        assert all(len(entries) == 16 for entries in vhalf.values())
+
     fb = banks[flat_bank]
     fb.extend(solid(1))          # tile 0
     fb.extend(solid(2))          # tile 1
@@ -501,31 +642,55 @@ def slice_banks(strips, max_cls, fixed_flat=None):
         fb.extend(encode_tile([[0] * 8] * (8 - j) + [[2] * 8] * j))
     for j in range(1, 8):        # tiles 12-18: bottom edges, j wall rows above
         fb.extend(encode_tile([[2] * 8] * j + [[3] * 8] * (8 - j)))
+    # Tiles 19-82: zero-row portal upper strips.  f/b are the front/back
+    # ceiling fractions; wall occupies the exact interior band, with portal
+    # space and ceiling both using backdrop color 0.
+    for f in range(8):
+        for b in range(8):
+            fb.extend(encode_tile([
+                [2 if 8 - f <= y < 8 - b else 0] * 8 for y in range(8)
+            ]))
+    # Tiles 83-146: zero-row lower-step strips.  Portal pixels are backdrop,
+    # the interior band is wall, and pixels below the front floor use color 3.
+    for f in range(8):
+        for b in range(8):
+            fb.extend(encode_tile([
+                [(0 if y < b else (2 if y < f else 3))] * 8
+                for y in range(8)
+            ]))
+    fb.extend(encode_tile([[2] * 8] + [[0] * 8] * 7))  # tile 147: upper row 0
+    fb.extend(encode_tile([[0] * 8] * 7 + [[2] * 8]))  # tile 148: lower row 7
+    assert len(fb) // TILE_BYTES == 149
     data = bytearray()
     for b in banks:
         data.extend(b.ljust(BANK_BYTES, b"\0"))
     used = sum(len(b) // TILE_BYTES for b in banks)
-    return bytes(data), slice_tile, slice_bank, used, flat_bank
+    return bytes(data), slice_tile, slice_bank, used, flat_bank, vhalf
 
 
-def write_luts(path, slice_tile, slice_bank, ntex, bg_palettes, hud=None,
-               sec_pal=None):
+def write_luts(path, slice_tile, slice_bank, ntex, max_cls, vperiod,
+               bg_palettes, hud=None, sec_pal=None, vhalf=None,
+               weapon_oam=None):
     bases = [min(t, 15) * SLICES_PER_TEX for t in range(16)]
     tables = [("slice_tile", slice_tile), ("slice_bank", slice_bank),
               ("tex_base_lo", [b & 0xFF for b in bases]),
               ("tex_base_hi", [b >> 8 for b in bases]),
+              ("tex_max_class", (max_cls + [0] * 16)[:16]),
+              ("tex_vperiod", (vperiod + [1] * 16)[:16]),
               ("bg_palettes", bg_palettes)]
     if hud:
         tables += [("hud_nt", hud[0]), ("hud_ex", hud[1]),
                    ("hud_palettes", HUD_PALETTES)]
-    if sec_pal:
-        tables += [("sec_pal", sec_pal)]
     with open(path, "w") as f:
         f.write("; GENERATED by tools/tilegen.py — do not edit\n")
         f.write(".export slice_tile, slice_bank, tex_base_lo, tex_base_hi\n")
+        f.write(".export tex_max_class, tex_vperiod\n")
+        f.write(".export vhalf_ptr_lo, vhalf_ptr_hi\n")
         f.write(".export bg_palettes\n")
         if hud:
             f.write(".export hud_nt, hud_ex, hud_palettes\n")
+        if weapon_oam:
+            f.write(".export weapon_oam\n")
         if sec_pal:
             f.write(".export sec_pal\n")
         f.write('.segment "LUT00"\n')
@@ -533,6 +698,38 @@ def write_luts(path, slice_tile, slice_bank, ntex, bg_palettes, hud=None,
             f.write(f"{name}:\n")
             for i in range(0, len(vals), 16):
                 f.write("    .byte " + ", ".join(f"${v:02X}" for v in vals[i:i+16]) + "\n")
+        # Sector palettes and sparse half-row slice tables live in the roomy
+        # map bank; LUT00 has only a few hundred bytes of headroom.
+        f.write('.segment "LUT01"\n')
+        if sec_pal:
+            f.write('sec_pal:\n')
+            for i in range(0, len(sec_pal), 16):
+                f.write("    .byte " + ", ".join(
+                    f"${v:02X}" for v in sec_pal[i:i+16]) + "\n")
+        vhalf = vhalf or {}
+        labels = []
+        for idx in range(32):
+            key = (10 + idx // 16, idx & 15)
+            labels.append(f"vhalf_{key[0]}_{key[1]}" if key in vhalf else "0")
+        f.write("vhalf_ptr_lo:\n")
+        for i in range(0, 32, 16):
+            f.write("    .byte " + ", ".join(
+                ("0" if s == "0" else f"<{s}") for s in labels[i:i+16]) + "\n")
+        f.write("vhalf_ptr_hi:\n")
+        for i in range(0, 32, 16):
+            f.write("    .byte " + ", ".join(
+                ("0" if s == "0" else f">{s}") for s in labels[i:i+16]) + "\n")
+        for (ci, ti), entries in sorted(vhalf.items()):
+            f.write(f"vhalf_{ci}_{ti}:\n")
+            vals = [value for tile, bank in entries for value in (tile, bank)]
+            for i in range(0, len(vals), 16):
+                f.write("    .byte " + ", ".join(
+                    f"${v:02X}" for v in vals[i:i+16]) + "\n")
+        if weapon_oam:
+            f.write("weapon_oam:\n")
+            for i in range(0, len(weapon_oam), 16):
+                f.write("    .byte " + ", ".join(
+                    f"${v:02X}" for v in weapon_oam[i:i+16]) + "\n")
 
 
 HUD_ROWS = 5              # status bar: tile rows 20-24 = 40 px, 32 cols
@@ -694,7 +891,10 @@ def main():
         sec_tex = texinfo["sec_tex"]
         names = [t["name"] for t in texlist]
         max_cls = [t["max_class"] for t in texlist]
-        rgb_maps, tex_bins, thresholds = wad_textures(args.wad, names)
+        rgb_maps, tex_bins, thresholds, native_heights = wad_textures(args.wad, names)
+        vperiod = [max(1, round(h * 0.4)) for h in native_heights]
+        if any(p > 255 for p in vperiod):
+            raise ValueError("scaled native texture period exceeds one byte")
         expected_flat = 60      # texture banks 0-59; FLAT_BANK in globals.inc
     elif args.game:
         index_maps = [brick_texture(), stone_texture()]
@@ -703,6 +903,7 @@ def main():
             {1: (210, 180, 140), 2: (150, 75, 40), 3: (80, 50, 35)},
             {1: (155, 155, 165), 2: (110, 115, 125), 3: (60, 65, 78)},
         ]
+        vperiod = [64] * len(index_maps)
         expected_flat = 2 * BANKS_PER_TEX
     else:
         ap.error("pass --test, --game, or --wad")
@@ -711,11 +912,11 @@ def main():
     bg_palettes = derive_palettes(ramp_bases)
 
     if args.wad:
-        strips = texture_strips_wad(rgb_maps, thresholds, ramp_bases)
+        strips = texture_strips_wad(rgb_maps, thresholds, ramp_bases, ramp_of)
     else:
         strips = texture_strips_indexed(index_maps, ramp_of)
         max_cls = [len(CLASSES) - 1] * len(strips)
-    data, st, sb, used, flat_bank = slice_banks(
+    data, st, sb, used, flat_bank, vhalf = slice_banks(
         strips, max_cls, fixed_flat=60 if args.wad else None)
     # FLAT_BANK is a build-time constant in src/globals.inc — keep them locked
     assert flat_bank <= expected_flat, f"flat bank {flat_bank} > {expected_flat}"
@@ -725,25 +926,49 @@ def main():
         flat_bank = expected_flat
     sec_pal = None
     if args.wad:
-        # per-sector palette sets: each sector derives its own warm/cool
-        # ramp pair from ITS textures (chroma-weighted bins); the engine
-        # loads the camera sector's 16 bytes during vblank every frame.
-        # Quantization is luminance-binned with hue purely in the palette,
-        # so the recolor stays coherent (Doom-colormap style).
+        # Keep the global baked ramp assignment stable in every sector and
+        # weight hues by wall usage.  Re-clustering each room independently
+        # made the same slice-bank bit mean different things and gave a tiny
+        # trim texture the same palette vote as a room's dominant wall.
         sec_pal = []
         for stex in sec_tex:
-            idxs = [int(k) for k in stex.keys()]
-            if not idxs:
+            if not stex:
                 sec_pal.extend(bg_palettes)
                 continue
-            sub_bins = [tex_bins[i] for i in idxs]
-            if len(sub_bins) == 1:
-                bases = [ramp_base(sub_bins[0])] * 2
-            else:
-                _, ba, bb = split_ramps(sub_bins)
-                bases = [ramp_base(ba), ramp_base(bb)]
+            merged = [{c: [0.0, 0.0, 0.0, 0.0] for c in (1, 2, 3)}
+                      for _ in range(2)]
+            for key, usage in stex.items():
+                ti = int(key)
+                for ramp in range(2):
+                    for c in (1, 2, 3):
+                        src = strips[ti][4][ramp][c]
+                        if src[3] <= 0:
+                            continue
+                        dst = merged[ramp][c]
+                        for k in range(3):
+                            dst[k] += src[k] * usage
+                        dst[3] += src[3] * usage
+            bases = []
+            for ramp in range(2):
+                if any(merged[ramp][c][3] for c in (1, 2, 3)):
+                    fallback = (bins_a, bins_b)[ramp]
+                    bins = {
+                        c: (tuple(merged[ramp][c][k] / merged[ramp][c][3]
+                                  for k in range(3)) + (merged[ramp][c][3],)
+                            if merged[ramp][c][3] else fallback[c])
+                        for c in (1, 2, 3)
+                    }
+                    bases.append(ramp_base(bins))
+                else:
+                    bases.append(ramp_bases[ramp])
+            if all(any(merged[r][c][3] for c in (1, 2, 3)) for r in range(2)) \
+                    and (bases[0][0] & 0x0F) == (bases[1][0] & 0x0F):
+                # Two used MMC5 ramps must not collapse to one hue.  Keep the
+                # local dominant warm fit and restore the global cool/gray fit.
+                bases[1] = ramp_bases[1]
             sec_pal.extend(derive_palettes(bases))
     hud = None
+    weapon_oam = None
     if args.wad:
         tiles, hud_nt, hud_ex = build_hud(args.wad, bg_palettes,
                                           flat_bank + 1)
@@ -758,8 +983,12 @@ def main():
             ebank.extend(t)
         data = data + bytes(ebank.ljust(BANK_BYTES, b"\0"))
         print(f"edges: 128 sloped tiles in bank {flat_bank + 2}")
+        assert len(data) == 63 * BANK_BYTES
+        weapon_bank, weapon_oam = build_weapon(args.wad)
+        data += weapon_bank
+        print(f"weapon: {len(weapon_oam) // 4} sprites in bank 63")
     write_luts(args.luts or "assets/build/luts.s", st, sb, len(strips),
-               bg_palettes, hud, sec_pal)
+               max_cls, vperiod, bg_palettes, hud, sec_pal, vhalf, weapon_oam)
     with open(args.out, "wb") as f:
         f.write(data)
     print(f"wrote {args.out}: {len(data)} bytes, {used} tiles, "

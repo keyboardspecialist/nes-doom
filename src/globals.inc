@@ -8,6 +8,9 @@ BUFA_NT = $6000     ; 640 bytes
 BUFA_EX = $6280     ; 640 bytes
 BUFB_NT = $6500
 BUFB_EX = $6780
+; Camera-sector palette metadata travels with each compose buffer.  The
+; pusher publishes it only after the final column reaches the nametable.
+BUFA_PAL_SEC = $6A00
 
 ; Pusher code banks (PRG02/PRG03 mapped at $8000 via $5114; bit7 = ROM)
 PUSH_BANK_A = $82
@@ -20,9 +23,12 @@ PUSH_JMP    = $8000     ; 32 x 3-byte JMP dispatch at the start of each pusher b
 ; the old 207-241 window and collided with NMI).
 ;   letterbox window: IRQ@199 -> NMI@241 = 42 lines ~ 4775 cycles;
 ;     entry ~130 + 10x410 + exit ~15 = 4245, ends ~line 236 (5-line margin)
-;   vblank: entry ~30 + DMA 514 + 3x410 + restore ~140 = 1914 of 2273
+;   E1M1 vblank: entry ~30 + OAM DMA ~520 + 2x410 + palette/restore ~350
+;     = ~1720 of 2273; measured rendering restore is scanline 249-257
 STATUS_LINE = 160
 BLANK_LINE  = 199
+VIEW_MASK   = %00011110  ; BG + sprites in the 160-line view
+STATUS_MASK = %00001110  ; BG only below the view
 SPLIT2_CMP  = 36    ; E1M1: phase-1 compare RELATIVE to the counter restart
                     ; after the line-160 palette-swap blank (measured)
 IRQ_QUOTA = 10
@@ -37,15 +43,15 @@ VIEW_COLS = 32
 PF_CLIP   = 36      ; angle-gate clip half-angle: 32 (45 deg) + atan slack;
                     ; must match the angcol_tbl domain in tools/tablegen.py
 
-; CHR bank layout (must match tools/tilegen.py): 5 banks per texture
-; (per-class isotropic texel widths, CLASS_TW), then the flats/status
-; bank (tile 0 ceiling, tile 2 floor, tile 3 checker).
+; CHR bank layout (must match tools/tilegen.py): variable banks for WAD
+; textures, six banks per synthetic texture, then the flats/status bank.
 .ifdef E1M1
 FLAT_BANK = 60      ; WAD textures fill banks 0-59 (variable banks/texture)
 EDGE_BANK = 62      ; 128 sloped silhouette tiles (HUD sits at 61)
+WEAPON_BANK = 63    ; static weapon sprite tiles
 .else
-FLAT_BANK = 10      ; 2 synthetic textures
+FLAT_BANK = 12      ; 2 synthetic textures, 6 banks each
 .endif
-SLICES_PER_TEX = 101    ; sum of per-class phase counts (1+2+2+4*4+8*2+16*4)
+SLICES_PER_TEX = 109    ; sum of per-class phase counts
 
 .endif

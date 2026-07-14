@@ -19,33 +19,38 @@
 .include "mmc5.inc"
 .include "globals.inc"
 
-.import mul16u, mul16s, atan2_hi, render_bsp, find_sector
+.import mul16u, mul16s, mul16s9, mul16s8u
+.import mul8u16u, mul8s16u, mul8s16s, mul16s16u
+.import atan2_hi, render_bsp, find_sector
 .import sin_lo, sin_hi, recipf_lo, recipf_hi
 .import recip_col_lo, recip_col_hi, light2_tbl, angcol_tbl
 .import slice_tile, slice_bank, tex_base_lo, tex_base_hi
+.import tex_max_class, tex_vperiod
+.import vhalf_ptr_lo, vhalf_ptr_hi
 .import map_verts, sec_floor, sec_ceil, sec_light
 .import ceil_clip, floor_clip
 .import PLAYER_PX, PLAYER_PY, PLAYER_ANG, EYE_REL
-.ifdef E1M1
-.import sec_pal
-.endif
 .import PX_MIN_H, PX_MAX_H, PY_MIN_H, PY_MAX_H
 .import REJECT_ROWB, reject_tbl
 .export render_frame, init_camera, do_seg
 
 .segment "BSS"
-vang:   .res 256            ; per-vertex view angle (BAM hi-byte), per pass
-vdone:  .res 32             ; bitmap: angle computed this pass
-vnear:  .res 32             ; bitmap: vertex too close for a reliable angle
+vang:    .res 256           ; per-vertex view angle (BAM hi-byte)
+vstamp:  .res 256           ; generation when this vertex was computed
+vflags:  .res 256           ; bit 7: too close for a reliable angle
 
 NEAR    = 256               ; s11.4: 16 world units
 TURN    = 512               ; BAM per pass (~2.8 deg)
 CEIL_NT  = 4                ; blank tile -> the backdrop IS the ceiling color
 CEIL_EX  = FLAT_BANK | $80  ; palette bits irrelevant for a blank tile
 FLOOR_NT = 2
-FLOOR_EX = FLAT_BANK        ; ramp A; dark bit added below fl_thr (row fade)
+FLOOR_EX = FLAT_BANK | $80  ; cool/gray ramp; dark bit added below fl_thr
 EDGE_TOP_BASE = 4           ; tiles 5-11: k wall rows below ceiling color
 EDGE_BOT_BASE = 11          ; tiles 12-18: k wall rows above floor color
+PORTAL_TOP_BASE = 19        ; 64 tiles: frontFrac*8 + backFrac
+PORTAL_BOT_BASE = 83        ; 64 tiles: portal / wall strip / floor
+PORTAL_TOP_WRAP = 147       ; subpixel strip in fraction bucket 7
+PORTAL_BOT_WRAP = 148
 
 .segment "CODE"
 
@@ -70,6 +75,7 @@ render_frame:
     lda #0
     sta cols_drawn
     sta segs_drawn
+    sta nodes_visited
     jsr read_input
     jsr update_cam
     jsr find_sector     ; -> cam_sec; eye follows the camera's sector floor
@@ -79,21 +85,13 @@ render_frame:
     adc #<EYE_REL
     sta eye_h
 .ifdef E1M1
-    ; pal_ptr = sec_pal + cam_sec*16: the NMI loads this sector's palette
-    ; set every frame during vblank (rooms get their own hue ramps)
-    lda #0
-    sta pal_ptr+1
+    ; Attach the camera sector to this compose buffer.  The pusher publishes
+    ; it only after the buffer's final column is visible.
+    lda front_buf
+    eor #1
+    tax
     lda cam_sec
-    .repeat 4
-    asl
-    rol pal_ptr+1
-    .endrepeat
-    clc
-    adc #<sec_pal
-    sta pal_ptr
-    lda pal_ptr+1
-    adc #>sec_pal
-    sta pal_ptr+1
+    sta BUFA_PAL_SEC,x
 .endif
     ; rj_ptr = reject_tbl + cam_sec * REJECT_ROWB (tiny per-frame multiply)
     lda #0
@@ -118,13 +116,18 @@ render_frame:
     asl
     asl
     sta rf_backoff
-    ; invalidate the per-vertex angle cache (camera moved)
-    ldy #31
+    ; Invalidate the angle cache with one generation increment.  On the rare
+    ; wrap, clear stamps so old generation 1 entries cannot become valid.
+    inc vang_gen
+    bne @cache_ready
+    ldx #0
     lda #0
-:   sta vdone,y
-    sta vnear,y
-    dey
-    bpl :-
+@clear_vstamp:
+    sta vstamp,x
+    inx
+    bne @clear_vstamp
+    inc vang_gen
+@cache_ready:
     jsr render_bsp
     lda frame_cnt
     sec
@@ -313,7 +316,7 @@ zdot:
     sta mul_b
     lda vcos+1
     sta mul_b+1
-    jsr mul16s
+    jsr mul16s9
     lda mul_r+1
     sta rt_acc
     lda mul_r+2
@@ -326,7 +329,7 @@ zdot:
     sta mul_b
     lda vsin+1
     sta mul_b+1
-    jsr mul16s
+    jsr mul16s9
     lda rt_acc
     clc
     adc mul_r+1
@@ -346,7 +349,7 @@ xdot:
     sta mul_b
     lda vsin+1
     sta mul_b+1
-    jsr mul16s
+    jsr mul16s9
     lda mul_r+1
     sta rt_acc
     lda mul_r+2
@@ -359,7 +362,7 @@ xdot:
     sta mul_b
     lda vcos+1
     sta mul_b+1
-    jsr mul16s
+    jsr mul16s9
     lda rt_acc
     sec
     sbc mul_r+1
@@ -369,7 +372,8 @@ xdot:
     sta ttx+1
     rts
 
-; rzh = recipf[clamp(tz>>4, 0..1023)] (table spans 4 pages -> pointer access)
+; rzh = 524288/z.  The table covers 0..1023 world units; for 1024..2047,
+; look up z/2 and halve the result instead of freezing distant perspective.
 rzh_lookup:
     lda ttz
     sta tptr
@@ -379,12 +383,16 @@ rzh_lookup:
     lsr tptr+1
     ror tptr
     .endrepeat
+    lda #0
+    sta vtmp
+@rzh_norm:
     lda tptr+1
     cmp #4
     bcc :+
-    lda #<512
-    ldx #>512
-    rts
+    lsr tptr+1
+    ror tptr
+    inc vtmp
+    bne @rzh_norm
 :   lda tptr
     clc
     adc #<recipf_lo
@@ -402,6 +410,16 @@ rzh_lookup:
     lda (tptr),y
     tax
     pla
+    ldy vtmp
+    beq :+
+@rzh_down:
+    stx tptr+1
+    lsr tptr+1
+    ror
+    ldx tptr+1
+    dey
+    bne @rzh_down
+:
     rts
 
 ; near-clip fraction: A = clamp255((NEAR - tz_behind) * recipf[dz>>4] >> 15)
@@ -440,32 +458,22 @@ shift3_cx:              ; hi16(mul_r) >> 3 signed -> A=lo X=hi
 
 mul_h_rzh:              ; A = h (SIGNED) -> A/X = (h * rzh1) >> 8, signed
     sta mul_a
-    ldx #0
-    ora #0              ; N from A (ldx clobbered it)
-    bpl :+
-    dex                 ; sign-extend
-:   stx mul_a+1
     lda rzh1
     sta mul_b
     lda rzh1+1
     sta mul_b+1
-    jsr mul16s
+    jsr mul8s16u
     lda mul_r+1
     ldx mul_r+2
     rts
 
 mul_h_step:             ; A = h (SIGNED) -> A/X = (h * rzstep) >> 8, signed
     sta mul_a
-    ldx #0
-    ora #0              ; N from A (ldx clobbered it)
-    bpl :+
-    dex
-:   stx mul_a+1
     lda rzstep
     sta mul_b
     lda rzstep+1
     sta mul_b+1
-    jsr mul16s
+    jsr mul8s16s
     lda mul_r+1
     ldx mul_r+2
     rts
@@ -624,12 +632,12 @@ clamp_row:              ; signed A -> clamped to [0, VIEW_ROWS]
     lda #0
     rts
 
-; fetch_vertex: Y = record offset of a 16-bit vertex index -> wx/wy
+; fetch_vertex: Y = record offset of an 8-bit vertex index -> wx/wy.  The
+; following byte is a normalized vertical texture phase, not an index high byte.
 fetch_vertex:
     lda (wall_ptr),y
     sta tptr
-    iny
-    lda (wall_ptr),y
+    lda #0
     sta tptr+1
     asl tptr
     rol tptr+1
@@ -660,7 +668,18 @@ fetch_vertex:
 ; (0 = mid/upper -> sl_tp/sl_bp, 4 = lower -> sl_tp_l/sl_bp_l).
 ; (The palette ramp bit rides bit 7 of each slice_bank LUT byte.)
 set_texptrs:
+    cpx #0
+    bne @lower_slot
+    sta sl_tex
+    jmp @slot_done
+@lower_slot:
+    sta sl_tex_l
+@slot_done:
     tay
+    lda tex_max_class,y
+    sta sl_mc,x
+    lda tex_vperiod,y
+    sta sl_vp,x
     lda tex_base_lo,y
     clc
     adc #<slice_tile
@@ -685,23 +704,11 @@ set_texptrs:
 ; ---------------------------------------------------------------------------
 vert_angle:
     stx vtmp
-    txa
-    and #7
-    tay
-    lda va_bit,y
-    sta vmask
-    txa
-    lsr
-    lsr
-    lsr
-    tay
-    lda vdone,y
-    and vmask
-    beq @compute
-    lda vnear,y
-    and vmask
-    bne @near
-    ldx vtmp
+    lda vstamp,x
+    cmp vang_gen
+    bne @compute
+    lda vflags,x
+    bmi @near
     lda vang,x
     clc
     rts
@@ -709,9 +716,8 @@ vert_angle:
     sec
     rts
 @compute:
-    lda vdone,y
-    ora vmask
-    sta vdone,y
+    lda vang_gen
+    sta vstamp,x
     ; rt_dx/rt_dy = vertex - camera (map_verts is 4-byte records)
     lda #0
     sta tptr+1
@@ -748,22 +754,17 @@ vert_angle:
     bcs @toonear
     ldx vtmp
     sta vang,x
+    lda #0
+    sta vflags,x
+    lda vang,x
     clc
     rts
 @toonear:
-    lda vtmp
-    lsr
-    lsr
-    lsr
-    tay
-    lda vnear,y
-    ora vmask
-    sta vnear,y
+    ldx vtmp
+    lda #$80
+    sta vflags,x
     sec
     rts
-
-va_bit:
-    .byte $01, $02, $04, $08, $10, $20, $40, $80
 
 ; seg_deltas: camera-relative deltas of both endpoints -> dx1/dy1 (v1),
 ; rt_dx/rt_dy (v2)
@@ -1025,47 +1026,6 @@ do_seg:
     iny
     lda (wall_ptr),y
     sta seg_texoff      ; u0, staged (uacc set below)
-    iny
-    lda (wall_ptr),y    ; tex (mid/upper)
-    ldx #0
-    jsr set_texptrs
-    ldy #7
-    lda (wall_ptr),y    ; tex_low
-    ldx #4
-    jsr set_texptrs
-    ldy #8
-    lda (wall_ptr),y    ; front sector: heights relative to eye (signed)
-    tax
-    lda sec_ceil,x
-    sec
-    sbc eye_h
-    sta seg_hc
-    lda eye_h
-    sec
-    sbc sec_floor,x
-    sta seg_hf
-    lda sec_light,x
-    sta seg_light
-    tay
-    lda fl_thr_tbl,y    ; floor rows below this are dark (row-distance fade)
-    sta fl_thr
-    ldy #9
-    lda (wall_ptr),y
-    sta seg_back
-    ldx #0
-    cmp #$FF
-    beq :+
-    tay
-    lda sec_ceil,y
-    sec
-    sbc eye_h
-    sta seg_bhc
-    lda eye_h
-    sec
-    sbc sec_floor,y
-    sta seg_bhf
-    ldx #1
-:   stx two_sided
 
     ; u endpoints (8.8): uacc = u0<<8, uend = (u0 + ulen)<<8
     lda #0
@@ -1129,7 +1089,7 @@ do_seg:
     sta mul_b
     lda #0
     sta mul_b+1
-    jsr mul16s
+    jsr mul16s8u
     lda tx1
     clc
     adc mul_r+1
@@ -1182,7 +1142,7 @@ do_seg:
     sta mul_b
     lda #0
     sta mul_b+1
-    jsr mul16s
+    jsr mul16s8u
     lda tx2
     clc
     adc mul_r+1
@@ -1230,7 +1190,7 @@ do_seg:
     sta mul_b
     lda rzh1+1
     sta mul_b+1
-    jsr mul16s
+    jsr mul16s16u
     lda mul_r+2
     and #7              ; 1/8-column fraction (the bits shift3_cx drops)
     sta frac1
@@ -1249,7 +1209,7 @@ do_seg:
     sta mul_b
     lda rzh2+1
     sta mul_b+1
-    jsr mul16s
+    jsr mul16s16u
     lda mul_r+2
     and #7
     sta frac2
@@ -1300,6 +1260,42 @@ do_seg:
 
 @spans:
     inc segs_drawn
+    ; Exact projected occlusion before interpolation setup.  The angle gate
+    ; rejects most hidden segs cheaply; this catches the remainder without
+    ; paying for reciprocal/u/perspective steps that can never emit a column.
+    lda cx1+1
+    bpl @occ_left_visible
+    lda #0
+    sta col_l
+    beq @occ_set_right
+@occ_left_visible:
+    lda cx1
+    sta col_l
+@occ_set_right:
+    lda cx2+1
+    bne @occ_right_edge
+    lda cx2
+    cmp #33
+    bcc :+
+@occ_right_edge:
+    lda #32
+:   sta col_r
+    ldy col_l
+@exact_occ:
+    lda ceil_clip,y
+    cmp floor_clip,y
+    bcc @exact_open
+    iny
+    cpy col_r
+    bcc @exact_occ
+    rts
+@exact_open:
+    ldy #1
+    lda (wall_ptr),y
+    sta seg_vphase
+    ldy #3
+    lda (wall_ptr),y
+    sta seg_vphase_l
     lda rt_acc+1
     beq :+
     lda #255
@@ -1442,7 +1438,7 @@ do_seg:
 @npu:
     ; left clip
     lda cx1+1
-    bpl @noadv
+    bpl @clip_done
     lda #0
     sec
     sbc cx1
@@ -1450,15 +1446,15 @@ do_seg:
     lda #0
     sbc cx1+1
     sta rt_dx+1
-    lda rt_dx
-    sta mul_a
-    lda rt_dx+1
-    sta mul_a+1
     lda rzstep
-    sta mul_b
+    sta mul_a
     lda rzstep+1
+    sta mul_a+1
+    lda rt_dx
+    sta mul_b
+    lda rt_dx+1
     sta mul_b+1
-    jsr mul16s
+    jsr mul16s16u
     lda rzh1
     clc
     adc mul_r
@@ -1484,15 +1480,15 @@ do_seg:
     sta uacc+1
     lda persp_on
     beq @nclu
-    lda rt_dx
-    sta mul_a
-    lda rt_dx+1
-    sta mul_a+1
     lda uoz_step
-    sta mul_b
+    sta mul_a
     lda uoz_step+1
+    sta mul_a+1
+    lda rt_dx
+    sta mul_b
+    lda rt_dx+1
     sta mul_b+1
-    jsr mul16s
+    jsr mul16s16u
     lda uoz_acc
     clc
     adc mul_r
@@ -1501,32 +1497,51 @@ do_seg:
     adc mul_r+1
     sta uoz_acc+1
 @nclu:
-    lda #0
-    sta col_l
-    beq @setr
-@noadv:
-    lda cx1
-    sta col_l
-@setr:
-    lda cx2+1
-    bne @r32
-    lda cx2
-    cmp #33
-    bcc :+
-@r32:
-    lda #32
-:   sta col_r
-    ; fully-occluded seg? (every column in [col_l, col_r) already solid)
-    ldy col_l
-@occ:
-    lda ceil_clip,y
-    cmp floor_clip,y
-    bcc @open
-    iny
-    cpy col_r
-    bcc @occ
-    rts
-@open:
+@clip_done:
+    ; Only surviving projected segments need texture pointers, sector heights,
+    ; and lighting.  Keeping this after exact occlusion avoids setup for the
+    ; many segs rejected by clipping or already-solid columns.
+    ldy #6
+    lda (wall_ptr),y    ; tex (mid/upper)
+    ldx #0
+    jsr set_texptrs
+    ldy #7
+    lda (wall_ptr),y    ; tex_low
+    ldx #4
+    jsr set_texptrs
+    ldy #8
+    lda (wall_ptr),y    ; front sector: heights relative to eye (signed)
+    tax
+    lda sec_ceil,x
+    sec
+    sbc eye_h
+    sta seg_hc
+    lda eye_h
+    sec
+    sbc sec_floor,x
+    sta seg_hf
+    lda sec_light,x
+    sta seg_light
+    tay
+    lda fl_thr_tbl,y    ; floor rows below this are dark (row-distance fade)
+    sta fl_thr
+    ldy #9
+    lda (wall_ptr),y
+    sta seg_back
+    ldx #0
+    cmp #$FF
+    beq :+
+    tay
+    lda sec_ceil,y
+    sec
+    sbc eye_h
+    sta seg_bhc
+    lda eye_h
+    sec
+    sbc sec_floor,y
+    sta seg_bhf
+    ldx #1
+:   stx two_sided
 
     ; --- height interpolators (from the already-advanced rzh1) ---
     lda seg_hc
@@ -1748,9 +1763,19 @@ emit_column_m5:
     sta cur_bp
     lda sl_bp+1
     sta cur_bp+1
+    lda sl_mc
+    sta cur_mc
+    lda sl_vp
+    sta cur_vp
+    lda seg_vphase
+    sta cur_phase
+    lda sl_tex
+    sta cur_tex
     lda #0
     sta ew_top
     sta ew_bot
+    lda emit_lt
+    sta edge_top_ex
     ; t = clamp(10 - vtop, [0,20], then [ceil0, floor0])   (vtop signed)
     lda #10
     sec
@@ -1797,25 +1822,12 @@ emit_column_m5:
     adc vbot
     beq @sliver
     bmi @swdone
-    ldx #0
-:   cmp #21             ; spans > 20 rows: halve until a class fits and
-    bcc :+              ; pixel-double vertically on emit (vshift) — the
-    lsr                 ; texture covers the whole wall instead of smearing
-    inx                 ; its last row
-    jmp :-
-:   stx vshift
-    tax
-    lda span_class,x
-    jsr set_slice
+    jsr set_period_slice
+    lda exbyte
+    sta edge_top_ex
     lda vtop
     sec
     sbc #10
-    sta eob
-    lda ek_top          ; true top sits ek/8 rows above the snapped row:
-    lsr                 ; round the texture anchor instead of flooring, or
-    lsr                 ; adjacent columns jitter up to half a row
-    clc                 ; (branchless: constant time, the M3 IRQ phase is
-    adc eob             ; 1-cycle sensitive to composer timing variance)
     sta eob
     lda t_row
     sta ers
@@ -1830,8 +1842,10 @@ emit_column_m5:
     ; zero-row wall: the boundary fractions still hold up to 7px of wall
     ; on each side of the row line — arm emit_edges instead of vanishing
     ; (distant walls used to pop in/out of existence here)
-    lda emit_lt
-    sta exbyte          ; edge tiles read light/ramp from exbyte bits 6-7
+    lda #0
+    jsr set_slice       ; retain the texture's baked warm/cool ramp
+    lda exbyte
+    sta edge_top_ex
     lda #1
     sta ew_top
     sta ew_bot
@@ -1898,27 +1912,16 @@ emit_column_m5:
     lda vtop
     sec
     sbc vbtop
-    bmi @noupper
+    bpl :+
+    jmp @noupper
+:
     beq @upsliver
-    ldx #0
-:   cmp #21
-    bcc :+
-    lsr
-    inx
-    jmp :-
-:   stx vshift
-    tax
-    lda span_class,x
-    jsr set_slice
+    jsr set_period_slice
+    lda exbyte
+    sta edge_top_ex
     lda vtop
     sec
     sbc #10
-    sta eob
-    lda ek_top
-    lsr
-    lsr
-    clc
-    adc eob
     sta eob
     lda t_row
     sta ers
@@ -1929,25 +1932,62 @@ emit_column_m5:
     sta ew_top
     bne @noupper
 @upsliver:
-    lda emit_lt         ; zero-row upper wall: top-edge fraction still shows
-    sta exbyte
-    lda #1
+    ; Front/back ceilings share a tile row.  Encode both fractions so the
+    ; wall strip stays at its true interior position instead of a tile edge.
+    lda ytop_acc
+    sec
+    sbc btop_acc
+    sta mtmp
+    lda ytop_acc+1
+    sbc btop_acc+1
+    bmi @noupper
+    bne @upencode
+    lda mtmp
+    beq @noupper
+@upencode:
+    lda btop_acc
+    and #$70
+    .repeat 4
+    lsr
+    .endrepeat
+    sta mtmp+1          ; back fraction
+    lda ek_top
+    sta mtmp+2          ; front fraction
+    cmp mtmp+1
+    bne @upkey
+    cmp #7              ; nonzero sub-pixel difference: retain one pixel
+    bcs @upwrap
+    inc mtmp+2
+    bne @upkey
+@upwrap:
+    lda #PORTAL_TOP_WRAP
+    sta edge_top_tile
+    bne @upselected
+@upkey:
+    lda mtmp+2
+    asl
+    asl
+    asl
+    ora mtmp+1
+    clc
+    adc #PORTAL_TOP_BASE
+    sta edge_top_tile
+@upselected:
+    lda #0              ; zero-row upper wall: preserve its texture ramp
+    jsr set_slice
+    lda exbyte
+    sta edge_top_ex
+    lda #2              ; flat a/b edge shape from the portal-part thickness
     sta ew_top
 @noupper:
     ; lower wall [bb, b): span_l = vbot - vbbot (signed); off = y - (10+vbbot)
     lda vbot
     sec
     sbc vbbot
-    bmi @nolower
+    bpl :+
+    jmp @nolower
+:
     beq @losliver
-    ldx #0
-:   cmp #21
-    bcc :+
-    lsr
-    inx
-    jmp :-
-:   stx vshift
-    tax
     lda sl_tp_l         ; lower wall uses its own texture + ramp
     sta cur_tp
     lda sl_tp_l+1
@@ -1956,27 +1996,21 @@ emit_column_m5:
     sta cur_bp
     lda sl_bp_l+1
     sta cur_bp+1
-    lda span_class,x
-    jsr set_slice
+    lda sl_mc+4
+    sta cur_mc
+    lda sl_vp_l
+    sta cur_vp
+    lda seg_vphase_l
+    sta cur_phase
+    lda sl_tex_l
+    sta cur_tex
+    jsr set_period_slice
     lda vbbot
     clc
     adc #10
     eor #$FF
     clc
     adc #1
-    sta eob
-    lda bbot_acc        ; back-floor sub-row fraction: >= 4px means the
-    and #$40            ; true top is over half a row below the snapped row
-    lsr
-    lsr
-    lsr
-    lsr
-    lsr
-    lsr
-    sta mtmp
-    lda eob
-    sec
-    sbc mtmp
     sta eob
     lda bb_row
     sta ers
@@ -1987,9 +2021,64 @@ emit_column_m5:
     sta ew_bot
     bne @nolower
 @losliver:
-    lda emit_lt         ; zero-row step: bottom-edge fraction still shows
-    sta exbyte
-    lda #1
+    ; Front/back floors share a tile row.  Encode both fractions so the step
+    ; occupies its true interior band and retains portal pixels above it.
+    lda ybot_acc
+    sec
+    sbc bbot_acc
+    sta mtmp
+    lda ybot_acc+1
+    sbc bbot_acc+1
+    bmi @nolower
+    bne @loencode
+    lda mtmp
+    beq @nolower
+@loencode:
+    lda bbot_acc
+    and #$70
+    .repeat 4
+    lsr
+    .endrepeat
+    sta mtmp+1
+    lda ek_bot
+    sta mtmp+2
+    cmp mtmp+1
+    bne @lokey
+    cmp #7
+    bcs @lowrap
+    inc mtmp+2
+    bne @lokey
+@lowrap:
+    lda #PORTAL_BOT_WRAP
+    sta edge_bot_tile
+    bne @loselected
+@lokey:
+    lda mtmp+2
+    asl
+    asl
+    asl
+    ora mtmp+1
+    clc
+    adc #PORTAL_BOT_BASE
+    sta edge_bot_tile
+@loselected:
+    lda sl_tp_l         ; select the lower texture's ramp for the step pixels
+    sta cur_tp
+    lda sl_tp_l+1
+    sta cur_tp+1
+    lda sl_bp_l
+    sta cur_bp
+    lda sl_bp_l+1
+    sta cur_bp+1
+    lda sl_mc+4
+    sta cur_mc
+    lda sl_vp_l
+    sta cur_vp
+    lda seg_vphase_l
+    sta cur_phase
+    lda #0
+    jsr set_slice
+    lda #2
     sta ew_bot
 @nolower:
     ; floor [b, floor0)
@@ -2029,8 +2118,115 @@ emit_column_m5:
     inc solid_cnt       ; portal closed on this column
 :   rts
 
+set_period_slice:
+    ; Select scale from one projected native texture period, not geometric
+    ; wall-part height.  This keeps texel scale stable and allows repetition.
+    lda cur_vp
+    sta mul_a
+    lda rzh1
+    sta mul_b
+    lda rzh1+1
+    sta mul_b+1
+    jsr mul8u16u
+    lda mul_r+1
+    asl
+    lda mul_r+2
+    rol                 ; projected texture period in screen tile rows
+    bne :+
+    lda #1
+:   ldx #0
+@period_reduce:
+    cmp #21
+    bcc @period_class
+    clc
+    adc #1
+    lsr
+    inx
+    bne @period_reduce
+@period_class:
+    stx vshift
+    tax
+    lda span_class,x
+    jsr set_slice
+    lda cur_phase       ; normalized 0..255 -> selected baked row
+    sta MMC5_MULT_A
+    lda eclh
+    sta MMC5_MULT_B
+    lda MMC5_MULT_A
+    sta mtmp
+    lda MMC5_MULT_B
+    sta mtmp+1
+    sta phase_row
+    jsr select_vhalf
+    rts
+
+select_vhalf:
+    ; Sparse 4-pixel shifted variants exist for selected 12/14-row slices.
+    lda eclh
+    cmp #12
+    beq @class12
+    cmp #14
+    beq :+
+    rts
+:
+    lda cur_tex
+    clc
+    adc #16
+    bne @pointer
+@class12:
+    lda cur_tex
+@pointer:
+    tay
+    lda vhalf_ptr_lo,y
+    sta tptr
+    lda vhalf_ptr_hi,y
+    beq @no
+    sta tptr+1
+
+    ; Static map phase selects the whole/half row.  Projected boundary
+    ; fractions are silhouette geometry and must not make texture origins
+    ; creep while approaching a wall.
+    lda mtmp
+    clc
+    adc #64
+    sta mtmp
+    lda mtmp+1
+    adc #0
+    sta mtmp+1
+    cmp eclh
+    bcc @normalized
+    sbc eclh
+    sta mtmp+1
+@normalized:
+    lda mtmp
+    asl
+    lda mtmp+1
+    rol
+    sta mtmp+2
+    lsr
+    sta phase_row
+    lda mtmp+2
+    and #1
+    beq @no
+    lda slice_phase
+    asl
+    tay
+    lda (tptr),y
+    sta tile_base
+    iny
+    lda (tptr),y
+    ora emit_lt
+    sta exbyte
+@no:
+    rts
+
 set_slice:              ; A = class index -> tile_base, eclh, exbyte
-    tax                 ; (reads through cur_tp/cur_bp = &tables[tex*101])
+    cmp cur_mc
+    bcc :+
+    beq :+
+    lda cur_mc
+:
+    tax                 ; reads through cur_tp/cur_bp for the selected texture
     lda class_h_tbl,x
     sta eclh
     ; phase = (u >> class_pshift) & class_pmask — per-class isotropic
@@ -2042,6 +2238,7 @@ set_slice:              ; A = class index -> tile_base, eclh, exbyte
     dey
     bne @sh
     and class_pmask,x
+    sta slice_phase
     clc
     adc class_base_tbl,x
     tay
@@ -2076,6 +2273,19 @@ emit_edges:
     cmp ceil0
     beq @net            ; no room above inside the clip window
     bcc @net
+    lda ew_top
+    cmp #2
+    bne :+
+    ldy t_row
+    dey
+    lda edge_top_tile
+    sta (dst_nt),y
+    lda edge_top_ex
+    and #$C0
+    ora #FLAT_BANK
+    sta (dst_ex),y
+    jmp @net
+:
     lda ytop_acc
     clc
     adc ytop_step
@@ -2120,7 +2330,7 @@ emit_edges:
     ldy t_row
     dey
     sta (dst_nt),y
-    lda exbyte
+    lda edge_top_ex
     and #$C0
     ora #EDGE_BANK
     sta (dst_ex),y
@@ -2135,6 +2345,18 @@ emit_edges:
     lda b_row
     cmp floor0
     bcs @neb
+    lda ew_bot
+    cmp #2
+    bne :+
+    ldy b_row
+    lda edge_bot_tile
+    sta (dst_nt),y
+    lda exbyte
+    and #$C0
+    ora #FLAT_BANK
+    sta (dst_ex),y
+    jmp @neb
+:
     lda ybot_acc
     clc
     adc ybot_step
@@ -2180,15 +2402,13 @@ emit_edges:
     adc #64             ; bottom-boundary tile set
     ldy b_row
     sta (dst_nt),y
-    lda exbyte
+    lda exbyte           ; prioritize the small wall feature's material ramp
     and #$C0
     ora #EDGE_BANK
     sta (dst_ex),y
 @neb:
 .else
     lda ew_top
-    beq @net
-    lda ek_top
     beq @net
     lda #10
     sec
@@ -2199,6 +2419,21 @@ emit_edges:
     cmp ceil0
     beq @net            ; no room above inside the clip window
     bcc @net
+    lda ew_top
+    cmp #2
+    bne :+
+    ldy t_row
+    dey
+    lda edge_top_tile
+    sta (dst_nt),y
+    lda edge_top_ex
+    and #$C0
+    ora #FLAT_BANK
+    sta (dst_ex),y
+    jmp @net
+:   lda ek_top
+    beq @net
+    lda t_row
     sec
     sbc #1
     tay
@@ -2206,14 +2441,12 @@ emit_edges:
     clc
     adc ek_top
     sta (dst_nt),y
-    lda exbyte
+    lda edge_top_ex
     and #$C0
     ora #FLAT_BANK
     sta (dst_ex),y
 @net:
     lda ew_bot
-    beq @neb
-    lda ek_bot
     beq @neb
     lda vbot
     clc
@@ -2223,6 +2456,20 @@ emit_edges:
     lda b_row
     cmp floor0
     bcs @neb
+    lda ew_bot
+    cmp #2
+    bne :+
+    ldy b_row
+    lda edge_bot_tile
+    sta (dst_nt),y
+    lda exbyte
+    and #$C0
+    ora #FLAT_BANK
+    sta (dst_ex),y
+    jmp @neb
+:   lda ek_bot
+    beq @neb
+    lda b_row
     tay
     lda #EDGE_BOT_BASE
     clc
@@ -2236,35 +2483,36 @@ emit_edges:
 .endif
     rts
 
-emit_wall_run:          ; rows [ers, ere), NT = tile_base +
-                        ; min((y+eob) >> vshift, eclh-1)
+emit_wall_run:          ; rows [ers, ere), wrapping one native texture period
     ldy ers
-@w:
+@wrap_row:
     cpy ere
-    bcs @done
+    bcs @wrap_done
     tya
     clc
     adc eob
     bpl :+
-    lda #0              ; sub-row rounding can push the first row to -1
-:   nop                 ; timing pad: without it the M3 IRQ-entry latency
-    ldx vshift          ; phase-locks and ~16% of scanline reads land on 159
+    lda #0
+:   ldx vshift
     beq :++
 :   lsr
     dex
     bne :-
-:   cmp eclh
+:   clc
+    adc phase_row
+@wrap_period:
+    cmp eclh
     bcc :+
-    lda eclh
-    sbc #1              ; carry is set
+    sbc eclh            ; carry is set by cmp
+    jmp @wrap_period
 :   clc
     adc tile_base
     sta (dst_nt),y
     lda exbyte
     sta (dst_ex),y
     iny
-    bne @w
-@done:
+    jmp @wrap_row
+@wrap_done:
     rts
 
 light_sh:
@@ -2276,21 +2524,21 @@ fl_thr_tbl:
     .byte 13, 15, 17, 32
 
 class_h_tbl:
-    .byte 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20
+    .byte 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16, 20
 
 ; per-class phase extraction (texel width tw: phases = 64/tw,
 ; shift = log2(tw) - 2 + 3? no: phase = (uacc16 >> (8 + log2(tw))) via
 ; uacc+1 >> (log2(tw))... values below are lsr counts on uacc+1 hi byte)
 class_pshift:           ; uacc+1 >> n (tw=4:2, 8:3, 16:4, 32:5, 64:5)
-    .byte 5, 5, 5, 4, 4, 4, 4, 3, 3, 2, 2, 2, 2
+    .byte 5, 5, 5, 4, 4, 4, 4, 3, 3, 3, 2, 2, 2, 2
 class_pmask:            ; phases-1
-    .byte 0, 1, 1, 3, 3, 3, 3, 7, 7, 15, 15, 15, 15
+    .byte 0, 1, 1, 3, 3, 3, 3, 7, 7, 7, 15, 15, 15, 15
 class_base_tbl:         ; cumulative phase counts per class
     .byte 0, 1, 3, 5, 9, 13, 17, 21, 29
-    .byte 37, 53, 69, 85
+    .byte 37, 45, 61, 77, 93
 
 span_class:             ; screen-row span -> smallest class >= span
-    .byte 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 12, 12
+    .byte 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 10, 11, 11, 12, 12, 13, 13, 13, 13
 
 ; compose-buffer column base addresses: [buf*32 + col] -> NT shadow + col*20
 colbase_lo:

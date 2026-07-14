@@ -10,8 +10,9 @@ Two modes:
 
 Engine data formats (must match src/bsp.s + src/render.s):
   vertex   4B  x, y                       s11.4 words
-  seg     10B  v1, v2 (vertex indices, 16-bit), ulen (texels), u0,
-               tex, tex_low (texture slots), front, back ($FF = solid)
+  seg     10B  v1, vphase, v2, vphase_low, ulen, u0, tex, tex_low
+                (vertex indices are 8-bit; phases are normalized 0..255),
+                front, back ($FF = solid)
   node    16B  px, py, pdx, pdy (s11.4), c0_idx, c0_isleaf, c1_idx, c1_isleaf,
                bbox x1,y1,x2,y2 (page bytes = s11.4 >> 8, subtree union)
                side 0 (child 0) when (x-px)*pdy - (y-py)*pdx >= 0
@@ -44,8 +45,11 @@ def emit_map(path, verts, segs, nodes, subsectors, sectors, root, player,
     for (x, y) in verts:
         vdata += words(x) + words(y)
     sdata = []
-    for (v1, v2, ulen, u0, tex, texl, front, back) in segs:
-        sdata += words(v1) + words(v2)
+    for seg in segs:
+        v1, v2, ulen, u0, tex, texl, front, back = seg[:8]
+        vphase = seg[8] if len(seg) > 8 else 0
+        vphase_l = seg[9] if len(seg) > 9 else 0
+        sdata += [v1 & 0xFF, vphase, v2 & 0xFF, vphase_l]
         sdata += [ulen & 0xFF, u0 & 0xFF, tex, texl, front,
                   0xFF if back is None else back]
     ndata = []
@@ -80,9 +84,11 @@ def emit_map(path, verts, segs, nodes, subsectors, sectors, root, player,
                 if reject(i, j):
                     rej[i * rowb + (j >> 3)] |= 1 << (j & 7)
 
+    # LUT01 also holds sparse V-half tables and the 144-byte weapon OAM image.
     total = (len(vdata) + len(sdata) + len(ndata) + 8 * len(subsectors)
-             + 3 * len(sectors) + len(rej))
-    assert total <= 8100, f"map data {total}B overflows the 8KB LUT01 bank"
+             + 3 * len(sectors) + len(rej) + 16 * len(sectors) + 736 + 144)
+    assert total <= 8100, (f"map and sector palettes {total}B overflow "
+                           "the 8KB LUT01 bank")
     assert len(nodes) <= 255 and len(subsectors) <= 255 and len(sectors) <= 254
     # 256-vertex cap: the engine caches per-vertex view angles in a 256-entry
     # table (vert_angle in render.s) and indexes it with the low index byte
@@ -229,10 +235,30 @@ EYE_WAD = round(41 * SCALE)
 BYTE_BUDGET = 7900
 
 
+def vertical_phase(kind, front_floor, front_ceil, back_floor, back_ceil,
+                   tex_height, row_offset, flags):
+    """Return Doom's wall V origin normalized to one native texture period."""
+    if kind == "solid":
+        anchor = (front_floor + tex_height
+                  if flags & 0x0010 else front_ceil)
+        top = front_ceil
+    elif kind == "upper":
+        anchor = (front_ceil
+                  if flags & 0x0008 else back_ceil + tex_height)
+        top = front_ceil
+    elif kind == "lower":
+        anchor = front_ceil if flags & 0x0010 else back_floor
+        top = back_floor
+    else:
+        raise ValueError(f"unknown wall kind: {kind}")
+    return ((anchor + row_offset - top) % tex_height) * 256 // tex_height
+
+
 def convert_wad(wadpath, mapname):
     import wadlib
     wad = wadlib.Wad(wadpath)
     m = wadlib.parse_map(wad, mapname)
+    texdefs = wadlib.texture_defs(wad)
 
     lines = m["linedefs"]
     sides = m["sidedefs"]
@@ -261,7 +287,8 @@ def convert_wad(wadpath, mapname):
             tex = up if up != "-" else (mid if mid != "-" else lo)
             texl = lo if lo != "-" else tex
         return {"p1": (x1, y1), "p2": (x2, y2), "ulen": ulen, "u0": u0,
-                "tex": tex, "texl": texl, "front": fs[5], "back": back}
+                "tex": tex, "texl": texl, "front": fs[5], "back": back,
+                "flags": l[2], "rowoff": fs[1]}
 
     ss_segs = []
     for (count, first) in m["ssectors"]:
@@ -412,29 +439,45 @@ def convert_wad(wadpath, mapname):
             for t, h in parts:
                 if t and t != "-":
                     texcount[t] += 1
-                    hs = max(1, round(h * SCALE))
+                    hs = max(1, round(texdefs[t][1] * SCALE))
+                    assert hs <= 255, f"texture {t} period {hs} exceeds one byte"
                     texh[t] = max(texh.get(t, 1), hs)
 
     def max_class(h):
         span = min(240, h)
         while span > 20:                 # engine vshift reduction
-            span >>= 1
+            span = (span + 1) >> 1
         for ci in range(len(TG_CLASSES)):
             if TG_CLASSES[ci] >= span:
-                return min(ci + 1, len(TG_CLASSES) - 1)   # +1 margin
+                return ci
         return len(TG_CLASSES) - 1
 
     def bank_cost(mc):
-        tiles = sum(TG_CLASSES[ci] * CLASS_PHASES[ci] for ci in range(mc + 1))
-        return -(-tiles // 250)          # ceil w/ packing slack
+        banks, used = 1, 0
+        for ci in range(mc + 1):
+            h = TG_CLASSES[ci]
+            for _ in range(CLASS_PHASES[ci]):
+                if used + h > 256:
+                    banks += 1
+                    used = 0
+                used += h
+        return banks
 
-    slots, used_banks = [], 0
+    slots, used_banks, variant_tiles = [], 0, 0
     for t, _ in texcount.most_common():
         mc = max_class(texh[t])
         cost = bank_cost(mc)
-        if used_banks + cost <= 60 and len(slots) < 16:
+        slot_index = len(slots)
+        variant_cost = 192 if mc >= 10 else 0       # 16 phases * 12 rows
+        if slot_index in {0, 2, 3, 4, 5, 6, 7} and mc >= 11:
+            variant_cost += 224                     # 16 phases * 14 rows
+        # Banks 43-59 are reserved for selective half-row variants.
+        if (used_banks + cost <= 43 and
+                variant_tiles + variant_cost <= 17 * 256 and
+                len(slots) < 16):
             slots.append({"name": t, "max_class": mc})
             used_banks += cost
+            variant_tiles += variant_cost
     print(f"textures: {len(slots)} slots, ~{used_banks} banks "
           f"({', '.join(s['name'] + ':' + str(s['max_class']) for s in slots)})")
     slot_of = {s["name"]: i for i, s in enumerate(slots)}
@@ -468,18 +511,45 @@ def convert_wad(wadpath, mapname):
             return slot_of[name]
         return subst_of.get(name, 0)
 
-    # per-sector texture usage (by slot) drives per-sector palette sets:
-    # the camera's sector selects its own ramp pair each frame (loaded
-    # during vblank), so rooms get individual hues
-    sec_tex = [Counter() for _ in range(len(kept))]
+    # Per-sector usage counts only wall parts that actually exist and weights
+    # them by projected source area.  Palette sets include a two-portal
+    # neighborhood: enough to represent walls seen through nearby openings
+    # without flattening the whole map to one global pair of hues.
+    local_sec_tex = [Counter() for _ in range(len(kept))]
     for i in kept_ss:
         for s in ss_segs[i]:
             back_kept = s["back"] is not None and s["back"] in kept
             fs = sec_renum[s["front"]]
-            if s["tex"] and s["tex"] != "-":
-                sec_tex[fs][slot(s["tex"])] += 1
-            if back_kept and s["texl"] and s["texl"] != "-":
-                sec_tex[fs][slot(s["texl"])] += 1
+            ff, fc, _ = m["sectors"][s["front"]]
+            if back_kept:
+                bf, bc, _ = m["sectors"][s["back"]]
+                if fc > bc and s["tex"] and s["tex"] != "-":
+                    local_sec_tex[fs][slot(s["tex"])] += s["ulen"] * (fc - bc)
+                if bf > ff and s["texl"] and s["texl"] != "-":
+                    local_sec_tex[fs][slot(s["texl"])] += s["ulen"] * (bf - ff)
+            elif s["tex"] and s["tex"] != "-":
+                local_sec_tex[fs][slot(s["tex"])] += s["ulen"] * (fc - ff)
+
+    kept_sorted = sorted(kept)
+    nall = len(m["sectors"])
+    rj = m["reject"]
+
+    def reject_old(i, j):
+        bit = i * nall + j
+        return bit >> 3 < len(rj) and bool(rj[bit >> 3] & (1 << (bit & 7)))
+
+    sec_tex = []
+    for cam_old in kept_sorted:
+        sources = {cam_old}
+        frontier = {cam_old}
+        for _ in range(2):
+            frontier = {n for s in frontier for n in adj.get(s, ())
+                        if n in kept and n not in sources}
+            sources.update(frontier)
+        usage = Counter()
+        for src_old in sources:
+            usage.update(local_sec_tex[sec_renum[src_old]])
+        sec_tex.append(usage)
 
     segs = []
     subsectors = []
@@ -489,9 +559,22 @@ def convert_wad(wadpath, mapname):
             back = s["back"]
             if back is not None and back not in kept:
                 back = None                      # solidify the cut boundary
+            ff, fc, _ = m["sectors"][s["front"]]
+
+            def vphase(name, kind):
+                si = slot(name)
+                actual = slots[si]["name"]
+                th = texdefs[actual][1]
+                bf, bc = (0, 0) if back is None else m["sectors"][back][:2]
+                return vertical_phase(kind, ff, fc, bf, bc, th,
+                                      s["rowoff"], s["flags"])
+
+            kind = "solid" if back is None else "upper"
+            vp = vphase(s["tex"], kind)
+            vpl = 0 if back is None else vphase(s["texl"], "lower")
             segs.append((vid(s["p1"]), vid(s["p2"]), s["ulen"], s["u0"],
                          slot(s["tex"]), slot(s["texl"]), sec_renum[s["front"]],
-                         None if back is None else sec_renum[back]))
+                         None if back is None else sec_renum[back], vp, vpl))
         subsectors.append((first, len(ss_segs[i]), sec_renum[ss_sector[i]]))
 
     nodes = []
@@ -519,16 +602,9 @@ def convert_wad(wadpath, mapname):
     pang = round(sang * 65536 / 360) & 0xFFFF
 
     # WAD REJECT lump: bit set = sector j not visible from sector i
-    kept_sorted = sorted(kept)
-    nall = len(m["sectors"])
-    rj = m["reject"]
-
     def reject(i_new, j_new):
         i, j = kept_sorted[i_new], kept_sorted[j_new]
-        bit = i * nall + j
-        if bit >> 3 >= len(rj):
-            return False
-        return bool(rj[bit >> 3] & (1 << (bit & 7)))
+        return reject_old(i, j)
 
     print(f"trim: kept {len(kept)}/{len(m['sectors'])} sectors, "
           f"{len(kept_ss)}/{len(ss_segs)} subsectors; textures: {slots}")

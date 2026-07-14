@@ -20,10 +20,13 @@ heartbeat   = $08
 irq_cnt     = $09
 exram_ok    = $0A   ; $A5 = ExRAM mode-%10 round trip passed
 sleeping    = $0B
+edge_top_tile = $0C ; exact interior-strip tile for a zero-row upper wall
+edge_bot_tile = $0D ; exact interior-strip tile for a zero-row lower wall
+vang_gen    = $0E   ; generation tag for the per-vertex angle cache
 
 ; --- pusher $10-$1F ---
 push_buf    = $10
-push_col    = $11
+push_col    = $11   ; logical progress through the 32-column push schedule
 push_quota  = $12
 front_buf   = $13
 flip_cnt    = $14   ; 16-bit
@@ -31,6 +34,7 @@ flip_cnt_hi = $15
 prg8000_sh  = $16   ; main-thread shadow of $5114 (write-only register)
 back_ready  = $17   ; composer -> pusher: back buffer holds a finished frame
 push_active = $18   ; a push_run is in flight (NMI must not start another)
+pal_sec     = $19   ; camera sector of the last fully displayed frame
 push_vec    = $1A   ; 16-bit dispatch vector
 uoz_step    = $1C   ; 16-bit, signed: per-column step of uoz (main thread;
                     ; $1C-$1F are unused by the NMI/IRQ pusher code)
@@ -69,12 +73,20 @@ cur_col     = $60
 frac1       = $61   ; 1/8-column projection fractions of the seg endpoints
 frac2       = $62   ; (zero-span segs with frac width still claim a column)
 persp_on    = $63   ; perspective-u active for this seg
-pal_ptr     = $64   ; 16-bit: &sec_pal[cam_sec*16], read by the NMI
-hclass      = $67   ; ($66-$67 unused M4-era leftovers)
+pal_ptr     = $64   ; 16-bit NMI-local pointer derived from pal_sec
+pal_active  = $66   ; sector used by the most recent NMI palette upload
+edge_top_ex = $67   ; saved palette/light bits for the top silhouette
 dst_nt      = $68   ; 16-bit
 dst_ex      = $6A   ; 16-bit
 tile_base   = $6C
 exbyte      = $6D
+sl_vp       = $6E   ; primary texture world period; lower copy is sl_vp+4
+seg_vphase  = $6F   ; normalized primary V phase from the map record
+seg_vphase_l = $70  ; normalized lower V phase
+cur_phase   = $71
+sl_vp_l     = $72
+cur_vp      = $73
+phase_row   = $74   ; normalized phase converted to the selected class
 
 ; --- render frame state $50-$5F ---
 rf_t0       = $50
@@ -122,7 +134,7 @@ at_sw       = $AF
 pass_frames = $80
 cols_drawn  = $81
 segs_drawn  = $82
-nodes_visited = $83
+nodes_visited = $83   ; node_side calls, including camera-sector lookup
 rj_ptr      = $84   ; 16-bit: &reject_tbl[cam_sec * REJECT_ROWB]
 bb_x1       = $86   ; bbox under test (page bytes) for bbox_cull
 bb_y1       = $87
@@ -180,7 +192,7 @@ ss_idx_hi   = $DE   ; 16-bit seg index high byte (ss_idx = $C5 is the low)
 bsp_leaf    = $DF   ; current BSP ref is a subsector
 
 ; --- slice LUT pointers $E0-$EB (per-seg; cur pair selected per wall part) ---
-sl_tp       = $E0   ; mid/upper: &slice_tile[tex*136]
+sl_tp       = $E0   ; mid/upper: &slice_tile[tex*SLICES_PER_TEX]
 sl_bp       = $E2
 sl_tp_l     = $E4   ; lower wall texture
 sl_bp_l     = $E6
@@ -192,6 +204,12 @@ pf_span     = $EE   ; a1 - a2 (mod 256)
 pf_c        = $EF   ; clamped left-endpoint angle index (a1_rel + PF_CLIP)
 dx1         = $F0   ; saved v1 camera-relative deltas (z-first transform)
 dy1         = $F2
+sl_mc       = $F4   ; maximum baked class; lower copy is sl_mc+4
+sl_tex      = $F5
+sl_tex_l    = $F6
+cur_tex     = $F7
+cur_mc      = $F9
+slice_phase = $FB   ; horizontal phase selected by set_slice
 dx2         = $FC   ; saved v2 camera-relative deltas
 dy2         = $FE
 

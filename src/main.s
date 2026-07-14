@@ -11,7 +11,7 @@
 
 .import nmi_handler, irq_handler, bg_palettes
 .ifdef E1M1
-.import hud_nt, hud_ex, sec_pal
+.import hud_nt, hud_ex, sec_pal, weapon_oam
 .endif
 .ifndef M2DEMO
 .import render_frame, init_camera
@@ -77,11 +77,15 @@ reset:
 .else
     ; status bar cells (rows 20-24, lines 160-199)
 .ifdef E1M1
-    ; pal_ptr must be valid before the first NMI (render_frame retargets it)
+    ; Both buffers and the initial display use sector 0.  Later render passes
+    ; attach their sector to the back buffer without touching pal_sec.
     lda #<sec_pal
     sta pal_ptr
     lda #>sec_pal
     sta pal_ptr+1
+    lda #0
+    sta BUFA_PAL_SEC
+    sta BUFA_PAL_SEC+1
 .endif
     ldx #0
 .ifdef E1M1
@@ -119,8 +123,28 @@ reset:
 
     jsr ppu_init
 
+.ifdef E1M1
+    ; Static weapon OAM.  The rest of the page was initialized to $FF above,
+    ; so all unused sprite records remain hidden.
+    ldx #0
+@weapon_oam:
+    lda weapon_oam,x
+    sta $0200,x
+    inx
+    cpx #144
+    bne @weapon_oam
+    lda #0
+    sta $2003
+    lda #$02
+    sta $4014           ; prime the first frame; NMI refreshes OAM thereafter
+.endif
+
     ; rendering on
-    lda #%00011110      ; BG + sprites, no clipping
+.ifdef E1M1
+    lda #VIEW_MASK
+.else
+    lda #STATUS_MASK
+.endif
     sta ppu2001_sh
     sta $2001
     lda #%10001000      ; NMI on, 8x8 sprites at $1000, BG $0000, VRAM inc +1
@@ -202,6 +226,17 @@ mmc5_init:
     sta MMC5_CHR_SPR0,x
     dex
     bpl @sprbanks
+.ifdef E1M1
+    ; 8x8 sprites use pattern table $1000: map its four 1KB pages to bank 63.
+    lda #WEAPON_BANK * 4
+    sta MMC5_CHR_SPR0+4
+    lda #WEAPON_BANK * 4 + 1
+    sta MMC5_CHR_SPR0+5
+    lda #WEAPON_BANK * 4 + 2
+    sta MMC5_CHR_SPR0+6
+    lda #WEAPON_BANK * 4 + 3
+    sta MMC5_CHR_SPR0+7
+.endif
     rts
 
 ; Round-trip all 1KB of ExRAM in mode %10. Result in exram_ok: $A5 = pass.
@@ -399,7 +434,11 @@ ppu_init:
     rts
 
 palette_spr:
+.ifdef E1M1
+    .byte $0F, $00, $08, $27
+.else
     .byte $0F, $30, $26, $05
+.endif
     .byte $0F, $30, $2A, $1A
     .byte $0F, $30, $22, $12
     .byte $0F, $30, $17, $07

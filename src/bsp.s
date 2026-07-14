@@ -228,6 +228,7 @@ bbc_yr: .byte 0, 0, 1, 0, 0, 1, 0, 1, 1
 ; Returns Y = 8 (side 0) or 10 (side 1) = offset of the NEAR child pair.
 ; ---------------------------------------------------------------------------
 node_side:
+    inc nodes_visited
     ; dx = camera - partition origin
     ldy #0
     lda px
@@ -247,6 +248,20 @@ node_side:
     lda py+1
     sbc (tptr),y
     sta rt_dy+1
+    ; Most Doom BSP partitions are axis-aligned.  Their cross-product sign
+    ; needs no multiplication: cross = dx*pdy for vertical partitions and
+    ; cross = -(dy*pdx) for horizontal partitions.  Explicit zero tests keep
+    ; the existing cross==0 -> side 0 rule.
+    ldy #4
+    lda (tptr),y
+    iny
+    ora (tptr),y
+    beq @vertical
+    ldy #6
+    lda (tptr),y
+    iny
+    ora (tptr),y
+    beq @horizontal
     ; dx * pdy
     ldy #6
     lda (tptr),y
@@ -293,8 +308,32 @@ node_side:
     txa
     sbc mul_r+3
     bpl @side0
+@side1:
     ldy #10
     rts
+@vertical:
+    ldy #6              ; malformed zero-length partition still has cross=0
+    lda (tptr),y
+    iny
+    ora (tptr),y
+    beq @side0
+    lda rt_dx
+    ora rt_dx+1
+    beq @side0
+    ldy #7
+    lda rt_dx+1
+    eor (tptr),y
+    bmi @side1
+    bpl @side0
+@horizontal:
+    lda rt_dy
+    ora rt_dy+1
+    beq @side0
+    ldy #5
+    lda rt_dy+1
+    eor (tptr),y
+    bmi @side0           ; negative product -> positive negated cross
+    bpl @side1
 @side0:
     ldy #8
     rts
