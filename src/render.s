@@ -21,7 +21,7 @@
 
 .import mul16u, mul16s, atan2_hi, render_bsp, find_sector
 .import sin_lo, sin_hi, recipf_lo, recipf_hi
-.import recip_col_lo, recip_col_hi, light_tbl, angcol_tbl
+.import recip_col_lo, recip_col_hi, light2_tbl, angcol_tbl
 .import slice_tile, slice_bank, tex_base_lo, tex_base_hi
 .import map_verts, sec_floor, sec_ceil, sec_light
 .import ceil_clip, floor_clip
@@ -40,7 +40,7 @@ TURN    = 512               ; BAM per pass (~2.8 deg)
 CEIL_NT  = 4                ; blank tile -> the backdrop IS the ceiling color
 CEIL_EX  = FLAT_BANK | $80  ; palette bits irrelevant for a blank tile
 FLOOR_NT = 2
-FLOOR_EX = FLAT_BANK        ; ramp A; light bit ORed in per column (emit_lt)
+FLOOR_EX = FLAT_BANK        ; ramp A; dark bit added below fl_thr (row fade)
 EDGE_TOP_BASE = 4           ; tiles 5-11: k wall rows below ceiling color
 EDGE_BOT_BASE = 11          ; tiles 12-18: k wall rows above floor color
 
@@ -498,16 +498,16 @@ resync_u:
     sta uacc+1
     rts
 
-clamp30:                ; signed A -> clamped to [-30, 30]
-    bpl @pos
-    cmp #<-30
-    bcs @done
-    lda #<-30
+clamp60:                ; signed A -> clamped to [-60, 60]. 60 covers every
+    bpl @pos            ; reachable span: near clip (16u) caps full-height
+    cmp #<-60           ; walls at ~51 rows; only ultra-tall sectors right at
+    bcs @done           ; the clip can still saturate.
+    lda #<-60
     rts
 @pos:
-    cmp #31
+    cmp #61
     bcc @done
-    lda #30
+    lda #60
 @done:
     rts
 
@@ -944,6 +944,9 @@ do_seg:
     sta seg_hf
     lda sec_light,x
     sta seg_light
+    tay
+    lda fl_thr_tbl,y    ; floor rows below this are dark (row-distance fade)
+    sta fl_thr
     ldy #9
     lda (wall_ptr),y
     sta seg_back
@@ -1450,7 +1453,9 @@ do_seg:
     ldy cur_col
     lda ceil_clip,y
     cmp floor_clip,y
-    bcs @advance        ; column already solid
+    bcc :+
+    jmp @advance        ; column already solid
+:
     ; perspective-u: re-anchor uacc from uoz/rzh every 8 drawn columns
     lda persp_cnt
     beq :+
@@ -1461,21 +1466,32 @@ do_seg:
     jsr resync_u
     lda #8
     sta persp_cnt
-:   ; two light levels now (palette bit 6); the ramp is palette bit 7.
-    ; dark when sector light + distance light >= 3
+:   ; light (palette bit 6): dark when 2*sector + light2 >= 6; the
+    ; half-band below the threshold (== 5) dissolves by column parity —
+    ; a hard 2-level step read as a vertical band across long walls
     lda rzh1
     asl
     lda rzh1+1
     rol
     tay
-    lda light_tbl,y
+    lda light2_tbl,y
     clc
     adc seg_light
-    cmp #3
-    lda #0
-    bcc :+
+    adc seg_light
+    cmp #6
+    bcs @ldark
+    cmp #5
+    bne @lbright
+    lda cur_col
+    lsr
+    bcs @lbright        ; odd columns stay bright inside the dissolve zone
+@ldark:
     lda #$40
-:   sta emit_lt
+    bne @lset
+@lbright:
+    lda #0
+@lset:
+    sta emit_lt
     ; sub-tile pixel remainders of the front boundaries (acc bits 4-6)
     lda ytop_acc
     and #$70
@@ -1491,10 +1507,14 @@ do_seg:
     lsr
     lsr
     sta ek_bot
-    ; phase = (uacc >> 11) & 7
+    ; phase = (uacc >> 11) & 7; zoom classes use (uacc >> 10) & 15
     lda uacc+1
     lsr
     lsr
+    tax
+    and #15
+    sta uphase2
+    txa
     lsr
     and #7
     sta uphase
@@ -1503,13 +1523,13 @@ do_seg:
     asl
     lda ytop_acc+1
     rol
-    jsr clamp30
+    jsr clamp60
     sta vtop
     lda ybot_acc
     asl
     lda ybot_acc+1
     rol
-    jsr clamp30
+    jsr clamp60
     sta vbot
     lda two_sided
     beq :+
@@ -1517,13 +1537,13 @@ do_seg:
     asl
     lda btop_acc+1
     rol
-    jsr clamp30
+    jsr clamp60
     sta vbtop
     lda bbot_acc
     asl
     lda bbot_acc+1
     rol
-    jsr clamp30
+    jsr clamp60
     sta vbbot
 :   jsr emit_column_m5
 @advance:
@@ -1665,10 +1685,14 @@ emit_column_m5:
     adc vbot
     beq @sliver
     bmi @swdone
-    cmp #21
-    bcc :+
-    lda #20
-:   tax
+    ldx #0
+:   cmp #21             ; spans > 20 rows: halve until a class fits and
+    bcc :+              ; pixel-double vertically on emit (vshift) — the
+    lsr                 ; texture covers the whole wall instead of smearing
+    inx                 ; its last row
+    jmp :-
+:   stx vshift
+    tax
     lda span_class,x
     jsr set_slice
     lda vtop
@@ -1701,8 +1725,20 @@ emit_column_m5:
     bcs @fldone
     lda #FLOOR_NT
     sta (dst_nt),y
-    lda #FLOOR_EX
-    ora emit_lt
+    ldx #0              ; bright
+    cpy fl_thr
+    bcs :++
+    ldx #$40            ; rows near the horizon are far -> dark
+    iny
+    cpy fl_thr
+    dey
+    bne :++
+    lda cur_col         ; boundary row: dither by column parity
+    lsr
+    bcc :++
+:   ldx #0
+:   txa
+    ora #FLOOR_EX
     sta (dst_ex),y
     iny
     bne @fl
@@ -1746,10 +1782,14 @@ emit_column_m5:
     sbc vbtop
     bmi @noupper
     beq @upsliver
-    cmp #21
+    ldx #0
+:   cmp #21
     bcc :+
-    lda #20
-:   tax
+    lsr
+    inx
+    jmp :-
+:   stx vshift
+    tax
     lda span_class,x
     jsr set_slice
     lda vtop
@@ -1776,10 +1816,14 @@ emit_column_m5:
     sbc vbbot
     bmi @nolower
     beq @losliver
-    cmp #21
+    ldx #0
+:   cmp #21
     bcc :+
-    lda #20
-:   tax
+    lsr
+    inx
+    jmp :-
+:   stx vshift
+    tax
     lda sl_tp_l         ; lower wall uses its own texture + ramp
     sta cur_tp
     lda sl_tp_l+1
@@ -1818,8 +1862,20 @@ emit_column_m5:
     bcs @pfldone
     lda #FLOOR_NT
     sta (dst_nt),y
-    lda #FLOOR_EX
-    ora emit_lt
+    ldx #0              ; bright
+    cpy fl_thr
+    bcs :++
+    ldx #$40            ; rows near the horizon are far -> dark
+    iny
+    cpy fl_thr
+    dey
+    bne :++
+    lda cur_col         ; boundary row: dither by column parity
+    lsr
+    bcc :++
+:   ldx #0
+:   txa
+    ora #FLOOR_EX
     sta (dst_ex),y
     iny
     bne @pfl
@@ -1837,15 +1893,21 @@ emit_column_m5:
 :   rts
 
 set_slice:              ; A = class index -> tile_base, eclh, exbyte
-    tax                 ; (reads through cur_tp/cur_bp = &tables[tex*104])
+    tax                 ; (reads through cur_tp/cur_bp = &tables[tex*136])
     lda class_h_tbl,x
     sta eclh
-    txa
-    asl
-    asl
-    asl
-    ora uphase
+    lda class_base_tbl,x
+    cpx #9              ; classes 12/14/16/20 are 2x-zoom: 16 phases
+    bcs @zoom
+    clc
+    adc uphase
     tay
+    jmp @look
+@zoom:
+    clc
+    adc uphase2
+    tay
+@look:
     lda (cur_tp),y
     sta tile_base
     lda (cur_bp),y      ; bank bits 0-5 + per-slice ramp in bit 7
@@ -1910,7 +1972,8 @@ emit_edges:
 @neb:
     rts
 
-emit_wall_run:          ; rows [ers, ere), NT = tile_base + min(y+eob, eclh-1)
+emit_wall_run:          ; rows [ers, ere), NT = tile_base +
+                        ; min((y+eob) >> vshift, eclh-1)
     ldy ers
 @w:
     cpy ere
@@ -1918,7 +1981,12 @@ emit_wall_run:          ; rows [ers, ere), NT = tile_base + min(y+eob, eclh-1)
     tya
     clc
     adc eob
-    cmp eclh
+    ldx vshift
+    beq :++
+:   lsr
+    dex
+    bne :-
+:   cmp eclh
     bcc :+
     lda eclh
     sbc #1              ; carry is set
@@ -1935,8 +2003,17 @@ emit_wall_run:          ; rows [ers, ere), NT = tile_base + min(y+eob, eclh-1)
 light_sh:
     .byte $00, $40, $80, $C0
 
+; sector light -> first floor row at light-0 distance (z = 656/(row-10)
+; through the 96/160/288 light bands; light-3 sectors are dark throughout)
+fl_thr_tbl:
+    .byte 13, 15, 17, 32
+
 class_h_tbl:
     .byte 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20
+
+class_base_tbl:         ; LUT entry offset per class: 8 phases below class
+    .byte 0, 8, 16, 24, 32, 40, 48, 56, 64      ; index 9, 16 phases from it
+    .byte 72, 88, 104, 120
 
 span_class:             ; screen-row span -> smallest class >= span
     .byte 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 12, 12

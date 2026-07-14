@@ -224,7 +224,7 @@ def build_micro():
 # ------------------------------------------------------------------ WAD map --
 SCALE = 0.4          # world units multiplier (keeps s11.4 deltas in int16)
 EYE_WAD = round(41 * SCALE)
-MAX_TEX = 15         # texture slots (banks 0-59; flats at bank 60)
+MAX_TEX = 10         # texture slots (6 CHR banks each, 0-59; flats at 60)
 BYTE_BUDGET = 7900
 
 

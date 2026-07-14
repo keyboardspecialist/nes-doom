@@ -34,6 +34,8 @@ push_active = $18   ; a push_run is in flight (NMI must not start another)
 push_vec    = $1A   ; 16-bit dispatch vector
 uoz_step    = $1C   ; 16-bit, signed: per-column step of uoz (main thread;
                     ; $1C-$1F are unused by the NMI/IRQ pusher code)
+fl_thr      = $1E   ; floor rows below this are dark (sector light + row fade)
+vshift      = $1F   ; vertical pixel-doubling shift for spans > 20 rows
 
 ; --- math $20-$2F ---
 mul_a       = $20   ; 16-bit
@@ -64,11 +66,11 @@ bsp_sp      = $4E
 
 ; --- emit $60-$7F ---
 cur_col     = $60
-wtop        = $61
+wtop        = $61   ; ($61-$63, $66-$67 are unused M4-era leftovers)
 wbot        = $62
 hclass      = $63
-uphase      = $64
-light       = $65
+uphase      = $64   ; 8-texel phase (u >> 3) for normal classes
+uphase2     = $65   ; 4-texel phase (u >> 2) for 2x-zoom classes (12/14/16/20)
 lut_ptr     = $66   ; 16-bit
 dst_nt      = $68   ; 16-bit
 dst_ex      = $6A   ; 16-bit
@@ -179,7 +181,7 @@ ss_idx_hi   = $DE   ; 16-bit seg index high byte (ss_idx = $C5 is the low)
 bsp_leaf    = $DF   ; current BSP ref is a subsector
 
 ; --- slice LUT pointers $E0-$EB (per-seg; cur pair selected per wall part) ---
-sl_tp       = $E0   ; mid/upper: &slice_tile[tex*104]
+sl_tp       = $E0   ; mid/upper: &slice_tile[tex*136]
 sl_bp       = $E2
 sl_tp_l     = $E4   ; lower wall texture
 sl_bp_l     = $E6

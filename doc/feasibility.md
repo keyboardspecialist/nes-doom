@@ -38,15 +38,15 @@ PAL-only for exactly this reason). Instead:
 | Parameter | Quantization |
 |---|---|
 | Column width | 8 px (32 columns) |
-| Wall screen height | 13 classes {1–8,10,12,14,16,20} tiles; class = smallest ≥ span, bottom rows crop |
-| Texture u | 8-texel phases (8 per 64-px texture), du/dx fixed within a slice |
+| Wall screen height | 13 classes {1–8,10,12,14,16,20} tiles; class = smallest ≥ span; spans > 20 pixel-double vertically |
+| Texture u | 8-texel phases (4-texel, 16 phases for zoom classes 12-20), du/dx fixed within a slice |
 | Vertical | wall tops snap to tile rows (horizon at row 10, eye fixed 48 units) |
 | Light | 4 levels = ExRAM palette bits (sector light + distance, clamped) |
 
-Measured tile cost: **866 tiles per texture** (1732 for two textures + 4 flat
-tiles, packed into 9 × 4KB banks = 36KB). At 4 banks/texture, **16 textures
-fill one 256KB $5130 window**; 1MB CHR holds 4 per-level texture sets.
-Light costs zero tiles.
+Measured tile cost: **1360 tiles per texture** since the 2x-zoom classes
+(866 before them), 6 x 4KB banks each. At 6 banks/texture, **10 textures +
+flats fill one 256KB $5130 window**; 1MB CHR holds 4 per-level texture
+sets. Light costs zero tiles.
 
 ## Frame pipeline (measured)
 
@@ -114,14 +114,22 @@ the ROM is NES 2.0-legal but real hardware means a custom board.
   = 64px of enemy per line; flicker-cycling and low monster caps required.
 - Texture u is now perspective-corrected in 8-column chunks (see below);
   residual affine drift within a chunk is under the 8-texel phase quantum.
-  Slice-class crop still stretches the bottom texel row when a wall
-  exceeds the view.
+  Spans over 20 rows render pixel-doubled vertically (vshift) instead of
+  cropping, so near walls no longer smear their last texel row.
 - One shared 3-color ramp across wall textures (2bpp tiles + 4-palette ramp);
   flats are solid colors (no span texturing); no sky yet (trivial: strips).
 - Fixed eye height; camera stays walkable-area-clamped.
 - The micro-map is hand-authored; a real WAD subset needs mapconv.py to
   parse/rescale WAD lumps and split segs on partition lines (mechanical, but
   unwritten). Doom-scale coordinates must rescale into s11.4 (±2047 units).
+- Full (untrimmed) E1M1 is deferred but scoped: 467 verts / ~816 split segs /
+  237 subsectors / 236 nodes / 85 sectors / 32 textures. Needs a second map
+  bank at $A000 (segs alone = 8160B), ss_*/sec_*/reject copied to PRG-RAM at
+  boot ($6A00-$7FFF free), a seg-record zp copy in do_seg across the bank
+  switch, frequency-sorted vertices so the 256-entry angle cache covers the
+  hottest (16-bit fallback for the rest), and nearest-color texture
+  substitution instead of mapconv's current "everything else -> slot 0".
+  Node/subsector byte indices still fit.
 
 ## Scaling estimates to "real" content
 
@@ -257,9 +265,71 @@ matching collapses dark Doom art onto whichever ramp is darkest (tried it:
 the whole map went gray). Pixels still bin by the texture's global
 luminance thresholds (keeps relative contrast), with a 2x2 ordered dither
 in a ±30%-of-bin band around each threshold. Result: STARTAN walls carry
-warm tan strips and cool gray computer-panel strips side by side. Floors
-now take the per-column light bit (sector + distance, same `emit_lt` as
-walls) instead of a fixed light level.
+warm tan strips and cool gray computer-panel strips side by side.
+
+Refinements after first playtesting (same session):
+
+- **Ramp coherence.** Independent per-strip argmin made near-tie strips
+  flip ramps randomly — walls striped. Now the texture's majority ramp
+  wins unless a strip prefers the other by a wide margin (< 0.55x error).
+  Ramp stays per (texture, phase) across all height classes, so a wall
+  section never changes ramp on approach.
+- **Box-filtered sampling.** Both decimations were nearest-neighbor (WAD
+  compose -> 64x64 point sample; 64 rows -> class height by row-dropping),
+  which aliased thin details away and turned distant classes into noise.
+  Both steps now area-average in RGB (`box_resample`), and quantization +
+  dither run at final class resolution (`quantize_rows`), so the dither
+  pattern can't moire through a rescale. The --game synthetic textures
+  keep the old index-map path.
+- **Row-lit floors.** First attempt gave floors the wall column's light
+  bit (`emit_lt`) — floor shading banded vertically wherever wall segs
+  changed depth, which reads as nonsense. Floor depth is a function of
+  screen ROW for a fixed eye height (z = 656/(row-10)), so the light now
+  comes from a 4-entry per-sector threshold table (`fl_thr_tbl`, sector
+  light -> first bright row; ~8 cycles/row): a smooth horizontal fade to
+  dark at the horizon, constant per sector. Sectors whose floor sits far
+  below the eye shift the true bands; the fixed table ignores that.
+
+## Close-range magnification (fourth session)
+
+Slices bake horizontal texture at a fixed 1 texel/px, but vertical scale
+grows with the height class — at class 16 a wall is 0.5 texel/px
+vertically. Up close the axes disagree: u advances < 8 texels per column,
+so phases repeat and the wall reads as the same 8-texel strip stamped at
+column frequency ("texture repeats faster as you approach"). Two more
+close-range bugs stacked on top: row offsets clamped at ±30 rows, so
+nearer than that the texture's vertical anchor saturated and the texture
+visibly slid; and spans > 20 rows clamp to class 20 with the row offset
+pinned to the last slice row — the bottom of near walls smeared one texel
+row. Fixes:
+
+- **2x-zoom slice sets** for classes 12/14/16/20: 4 texels per column
+  stretched to 8 px, 16 phases (4-texel granularity), matching those
+  classes' vertical magnification. `set_slice` picks phase (u>>10)&15 via
+  a per-class LUT base offset table; zoomed slices inherit the parent
+  8-texel strip's palette ramp. Cost: 1360 tiles = 6 CHR banks per texture
+  (ExAttr bank field is 6 bits = 64 banks per frame window), so texture
+  slots drop 15 -> 10 (mapconv MAX_TEX; trim-local top-10 covers ~90% of
+  visible surfaces). FLAT_BANK stays 60 for E1M1; the --game build moves
+  to FLAT_BANK 12.
+- **Vertical pixel-doubling for spans > 20 rows** (`vshift`): halve the
+  span until a class fits and shift the emit row offset right by the same
+  amount — the texture covers the whole wall in blocky 2x/4x rows instead
+  of smearing its last row, and pairs with the horizontal zoom so both
+  axes magnify together.
+- **clamp30 -> clamp60** on the per-column row offsets: covers every
+  reachable span (near clip at 16 units caps full walls at ~51 rows), so
+  the vertical anchor no longer saturates and slides.
+- **Ramp fixes**: isolated-deviant smoothing (a strip flanked by two
+  majority-ramp strips reverts) on top of the majority-margin rule, and
+  `ramp_base` now picks ONE hue column for a whole ramp (summed over the
+  three bins) — per-row independent matching had produced incoherent
+  ramps like yellow/gray/black. E1M1 derives tan {37,27,17} + gray
+  {20,10,00}.
+
+Measured: pass-frame envelopes unchanged everywhere (M5 worst 6, E1M1
+start 20, near-wall 2). Close walls now show the texture at the correct
+scale with no repetition, sliding, or smear.
 
 **Sub-row walls no longer vanish (pop-in fix).** A wall whose screen span
 rounds to zero rows used to emit nothing — distant steps and lintels

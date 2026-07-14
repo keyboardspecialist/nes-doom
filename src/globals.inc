@@ -31,13 +31,14 @@ VIEW_COLS = 32
 PF_CLIP   = 36      ; angle-gate clip half-angle: 32 (45 deg) + atan slack;
                     ; must match the angcol_tbl domain in tools/tablegen.py
 
-; CHR bank layout (must match tools/tilegen.py): 4 banks per texture, then
-; the flats/status bank (tile 0 ceiling, tile 2 floor, tile 3 checker).
+; CHR bank layout (must match tools/tilegen.py): 6 banks per texture
+; (classes 12/14/16/20 carry 16-phase 2x-zoom slices), then the flats/status
+; bank (tile 0 ceiling, tile 2 floor, tile 3 checker).
 .ifdef E1M1
-FLAT_BANK = 60      ; 15 WAD textures
+FLAT_BANK = 60      ; 10 WAD textures
 .else
-FLAT_BANK = 8       ; 2 synthetic textures
+FLAT_BANK = 12      ; 2 synthetic textures
 .endif
-SLICES_PER_TEX = 104    ; 13 height classes x 8 phases
+SLICES_PER_TEX = 136    ; 9 classes x 8 phases + 4 zoom classes x 16 phases
 
 .endif
