@@ -299,6 +299,12 @@ def texture_strips_wad(rgb_maps, thresholds, ramp_bases):
                 right = ramps[p + 1] if p < 7 else major
                 if left == major and right == major:
                     ramps[p] = major
+        # 16-texel ramp blocks: every class with tw <= 16 sees identical
+        # ramp boundaries, so palette regions stay put as classes change
+        # with distance (they used to pop at class transitions)
+        blocks = [ramps[2 * b] if ramps[2 * b] == ramps[2 * b + 1] else major
+                  for b in range(4)]
+        ramps = [blocks[p >> 1] for p in range(8)]
         strips.append(("rgb", rgbmap, ramps, p33, p66))
     return strips
 
@@ -403,6 +409,7 @@ def slice_banks(strips):
     for ti, (kind, texmap, ramps, p33, p66) in enumerate(strips):
         bank = ti * BANKS_PER_TEX
         limit = bank + BANKS_PER_TEX
+        major = max(set(ramps), key=ramps.count)
         for ci, h in enumerate(CLASSES):
             hpx = h * 8
             tw = CLASS_TW[ci]
@@ -421,7 +428,9 @@ def slice_banks(strips):
                 cp33 = lums[len(lums) // 3]
                 cp66 = lums[(2 * len(lums)) // 3]
             for p in range(CLASS_PHASES[ci]):
-                ramp = ramps[min(7, p * tw // 8)]
+                # tw <= 16 aligns to the 16-texel ramp blocks; wider (far)
+                # slices span several blocks and take the texture majority
+                ramp = ramps[min(7, p * tw // 8)] if tw <= 16 else major
                 if kind == "rgb":
                     col = quantize_rows(scaled[p], cp33, cp66)
                 else:

@@ -359,6 +359,21 @@ quantizing minified slices with the texture-global thresholds flattens
 them — thresholds are re-derived per (texture, class) from the filtered
 pixels so every scale keeps its thirds.
 
+**Perspective-u anchoring + palette stability (same session).** The
+8-column resync had a granularity flaw: between divisions u ran on the
+whole-seg affine slope, then SNAPPED to the exact value at each anchor — a
+phase pop marching across strong-perspective walls in motion. `chunk_u`
+now divides twice per chunk (current column + interpolants advanced 8
+columns) and sets the chunk slope to land exactly on the next anchor: u is
+continuous piecewise-linear through exact points, nothing snaps. Seg
+tails (< 8 columns left) get exact per-column divisions. Two more palette
+stabilizers: ramp bits are constant over 16-texel blocks (pair-agreed or
+texture-majority), so every class with tw <= 16 sees identical ramp
+boundaries and palette regions stay put through class transitions (wider
+far slices take the majority); and the light-dissolve dither keys on a
+texture-u bit instead of screen column parity, so it is anchored to the
+wall surface and no longer shimmers when the camera moves.
+
 **Thin geometry (same session).** Zero-column spans were rejected at
 projection, so sub-column segs — thin pillars, edge-on walls — blinked
 out of existence. The projection already computes 1/8-column fractional

@@ -451,13 +451,13 @@ mul_h_step:             ; A = h (SIGNED) -> A/X = (h * rzstep) >> 8, signed
     rts
 
 ; ---------------------------------------------------------------------------
-; resync_u: uacc = (uoz_acc << 16) / rzh1 — the exact perspective u at the
-; current column. Restoring division, 16 bits: the quotient fits because
-; u < 256 texels guarantees uoz < rzh, and both interpolate linearly so the
-; invariant holds at every column. ~420 cycles, every 8th drawn column of
-; wide segs only. Clobbers mtmp, A, X, Y.
+; div_u: mtmp+2/3 = (uoz_acc << 16) / rzh1 — the exact perspective u at the
+; interpolants' current position. Restoring division, 16 bits: the quotient
+; fits because u < 256 texels guarantees uoz < rzh, and both interpolate
+; linearly so the invariant holds at every column. ~420 cycles.
+; Clobbers mtmp, A, X, Y.
 ; ---------------------------------------------------------------------------
-resync_u:
+div_u:
     lda uoz_acc
     sta mtmp            ; remainder = dividend high word (low word is 0)
     lda uoz_acc+1
@@ -492,10 +492,92 @@ resync_u:
     rol mtmp+3
     dex
     bne @dl
+    rts
+
+; ---------------------------------------------------------------------------
+; chunk_u: perspective-u anchor. Snaps uacc exact at the current column,
+; then looks ahead 8 columns (advance interpolant copies, divide again) and
+; sets ustep so the affine run lands EXACTLY on the next anchor — u is
+; continuous piecewise-linear through exact points. The old scheme kept the
+; whole-seg slope and snapped at each resync: a visible phase pop marching
+; across strong-perspective walls. Segs with < 8 columns left get exact
+; per-column anchors instead (persp_cnt stays 0).
+; ---------------------------------------------------------------------------
+chunk_u:
+    jsr div_u
     lda mtmp+2
     sta uacc
     lda mtmp+3
     sta uacc+1
+    lda col_r
+    sec
+    sbc cur_col
+    cmp #9
+    bcs :+
+    rts                 ; tail: per-column exact until the seg ends
+:
+    ; save interpolants, advance both copies by 8 columns
+    lda rzh1
+    pha
+    lda rzh1+1
+    pha
+    lda uoz_acc
+    pha
+    lda uoz_acc+1
+    pha
+    lda rzstep
+    sta ttx             ; ttx/ttz free here: 8*step scratch
+    lda rzstep+1
+    sta ttx+1
+    lda uoz_step
+    sta ttz
+    lda uoz_step+1
+    sta ttz+1
+    .repeat 3
+    asl ttx
+    rol ttx+1
+    asl ttz
+    rol ttz+1
+    .endrepeat
+    lda rzh1
+    clc
+    adc ttx
+    sta rzh1
+    lda rzh1+1
+    adc ttx+1
+    sta rzh1+1
+    lda uoz_acc
+    clc
+    adc ttz
+    sta uoz_acc
+    lda uoz_acc+1
+    adc ttz+1
+    sta uoz_acc+1
+    jsr div_u           ; mtmp+2/3 = u at the next anchor
+    pla
+    sta uoz_acc+1
+    pla
+    sta uoz_acc
+    pla
+    sta rzh1+1
+    pla
+    sta rzh1
+    ; ustep = (u_next - uacc) >> 3, signed
+    lda mtmp+2
+    sec
+    sbc uacc
+    sta ustep
+    lda mtmp+3
+    sbc uacc+1
+    sta ustep+1
+    .repeat 3
+    lda ustep+1
+    cmp #$80
+    ror ustep+1
+    ror ustep
+    .endrepeat
+    lda #8
+    sta persp_cnt
     rts
 
 clamp60:                ; signed A -> clamped to [-60, 60]. 60 covers every
@@ -1265,6 +1347,7 @@ do_seg:
     ; spans; skipped when the seg's u range wraps 256 texels (uoz would be
     ; a sawtooth, not a line).
     lda #0
+    sta persp_on
     sta persp_cnt
     lda n0c
     cmp #9
@@ -1334,8 +1417,8 @@ do_seg:
     sta uoz_step
     lda mul_r+3
     sta uoz_step+1
-:   lda #9
-    sta persp_cnt
+:   lda #1
+    sta persp_on        ; persp_cnt = 0: first anchor at the first drawn col
 @npu:
     ; left clip
     lda cx1+1
@@ -1379,7 +1462,7 @@ do_seg:
     lda uacc+1
     adc mul_r+1
     sta uacc+1
-    lda persp_cnt
+    lda persp_on
     beq @nclu
     lda rt_dx
     sta mul_a
@@ -1476,16 +1559,13 @@ do_seg:
     bcc :+
     jmp @advance        ; column already solid
 :
-    ; perspective-u: re-anchor uacc from uoz/rzh every 8 drawn columns
-    lda persp_cnt
+    ; perspective-u: anchor due? (chunk_u keeps u continuous through
+    ; exact anchors — no snapping)
+    lda persp_on
     beq :+
-    sec
-    sbc #1
-    sta persp_cnt
+    lda persp_cnt
     bne :+
-    jsr resync_u
-    lda #8
-    sta persp_cnt
+    jsr chunk_u
 :   ; light (palette bit 6): dark when 2*sector + light2 >= 6; the
     ; half-band below the threshold (== 5) dissolves by column parity —
     ; a hard 2-level step read as a vertical band across long walls
@@ -1502,9 +1582,9 @@ do_seg:
     bcs @ldark
     cmp #5
     bne @lbright
-    lda cur_col
-    lsr
-    bcs @lbright        ; odd columns stay bright inside the dissolve zone
+    lda uacc+1
+    and #8              ; 8-texel parity: anchored to the wall surface, so
+    bne @lbright        ; the dissolve does not shimmer when the camera moves
 @ldark:
     lda #$40
     bne @lset
@@ -1570,7 +1650,7 @@ do_seg:
     lda uacc+1
     adc ustep+1
     sta uacc+1
-    lda persp_cnt
+    lda persp_on
     beq :+
     lda uoz_acc
     clc
@@ -1579,6 +1659,9 @@ do_seg:
     lda uoz_acc+1
     adc uoz_step+1
     sta uoz_acc+1
+    lda persp_cnt
+    beq :+
+    dec persp_cnt
 :   lda ytop_acc
     clc
     adc ytop_step
