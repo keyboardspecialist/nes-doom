@@ -96,8 +96,10 @@ wy          = $92
 cx1         = $94   ; 16-bit signed projected columns
 cx2         = $96
 ulen        = $98   ; wall length in texels (<= 255)
-tclip       = $9A
-wall_cnt    = $9B
+tclip       = $9A   ; near-clip fraction; reused at emit time as ew_top
+wall_cnt    = $9B   ; (M4-era) reused at emit time as ew_bot
+ew_top      = $9A   ; "a wall run was drawn at the t boundary" -> edge tile ok
+ew_bot      = $9B
 ttx         = $9C   ; transform output, s11.4 camera space
 ttz         = $9E
 rt_dx       = $A0
@@ -114,6 +116,15 @@ cols_drawn  = $81
 segs_drawn  = $82
 nodes_visited = $83
 rj_ptr      = $84   ; 16-bit: &reject_tbl[cam_sec * REJECT_ROWB]
+bb_x1       = $86   ; bbox under test (page bytes) for bbox_cull
+bb_y1       = $87
+bb_x2       = $88
+bb_y2       = $89
+seg_rmp     = $8A   ; ramp bit ($00/$80) of the mid/upper texture
+seg_rmp_l   = $8B   ; ... of the lower texture
+ek_top      = $8C   ; sub-tile pixel remainders of the wall boundaries
+ek_bot      = $8D
+cur_rmp     = $8E   ; ramp bit for the wall part being emitted
 zp_canary   = $8F   ; must stay $C5
 
 ; --- seg height interpolators $B0-$BF (h * rzh >> 8, linear in screen x) ---

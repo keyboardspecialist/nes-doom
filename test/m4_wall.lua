@@ -67,8 +67,9 @@ emu.addEventCallback(function()
     if cols < 28 then return fail("fewer than 28 columns emitted") end
 
     local nt, ex = readCol(frontBase(), 16)
-    if ex[2] ~= 0x88 or nt[2] ~= 0x00 then
-      return fail(string.format("ceiling wrong at col16 row2: NT=%02X EX=%02X", nt[2], ex[2]))
+    -- row 1: pure ceiling (row 2 may hold a pixel-precision edge tile)
+    if ex[1] ~= 0x88 or nt[1] ~= 0x04 then
+      return fail(string.format("ceiling wrong at col16 row1: NT=%02X EX=%02X", nt[1], ex[1]))
     end
     if ex[17] ~= 0x48 or nt[17] ~= 0x02 then
       return fail(string.format("floor wrong at col16 row17: NT=%02X EX=%02X", nt[17], ex[17]))
