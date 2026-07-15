@@ -7,7 +7,7 @@
 .include "zeropage.inc"
 .include "mmc5.inc"
 
-.import recipf_lo, atan_tbl, recip_col_lo, recip_col_hi
+.import atan_tbl, log2_mant, atan_log_tbl, recip_col_lo, recip_col_hi
 .export mul16u, mul16s, mul16s9, mul16s8u
 .export mul8u16u, mul8s16u, mul8s16s, mul16s16u
 .export atan2_hi, atan2_pg
@@ -276,11 +276,11 @@ neg_r:
 
 ; ---------------------------------------------------------------------------
 ; atan2_hi: angle of (rt_dx, rt_dy) in BAM high-byte units (256 per circle,
-; CCW, 0 = +x). Division-free: fold into the first octant, then
-; t = atan_tbl[min * recipf[(max+8)>>4] >> 15] on the multiplier.
+; CCW, 0 = +x). Fold into the first octant, then use the difference between
+; compact Q4 log2 magnitudes to look up atan(2^-difference).
 ; Returns A = angle with C clear. C set = |dx| and |dy| both < 256 (16 world
-; units): recipf clamps there and the ratio is garbage — caller must fall
-; back to the exact path.
+; units), where quantized angles are unsuitable for culling and the caller
+; must fall back to the exact path.
 ; Clobbers ttx, ttz, mtmp, tptr, mul regs, at_sx/at_sy/at_sw, X, Y.
 ; ---------------------------------------------------------------------------
 atan2_hi:
@@ -356,68 +356,54 @@ atan2_hi:
     bne :+
     sec                 ; max < 256 -> too close, ratio unreliable
     rts
-:   cmp #$40            ; keep (max+8)>>4 inside the 1024-entry table
-    bcc :+
-    lsr mtmp+1
-    ror mtmp
-    lsr mul_a+1
-    ror mul_a
-:   ; m = (max + 8) >> 4 (rounded), clamped to 1023
-    lda mtmp
-    clc
-    adc #8
-    sta mtmp
-    lda mtmp+1
-    adc #0
-    sta mtmp+1
+:   ; Normalize max to $80xx..$FFxx, applying the same shifts to min.
+    bmi @max_norm
+@max_loop:
+    asl mul_a
+    rol mul_a+1
+    asl mtmp
+    rol mtmp+1
+    bpl @max_loop
+@max_norm:
+    ldx #0
+    lda mul_a+1
+    beq @angle_zero      ; min/max < 1/128: rounded first-octant angle is zero
+    bmi @min_norm
+@min_loop:
+    inx
+    asl mul_a
+    rol mul_a+1
+    bpl @min_loop
+@min_norm:
+    ldy mtmp+1
+    lda log2_mant-$80,y
+    sta ttz              ; Q4 log mantissa of max
+    ldy mul_a+1
+    lda log2_mant-$80,y
+    sta ttx              ; Q4 log mantissa of min
+    txa
     .repeat 4
-    lsr mtmp+1
-    ror mtmp
-    .endrepeat
-    lda mtmp+1
-    cmp #4
-    bcc :+
-    lda #$FF
-    sta mtmp
-    lda #3
-    sta mtmp+1
-:   lda mtmp
+    asl
+    .endrepeat           ; exponent difference * 16
     clc
-    adc #<recipf_lo
-    sta tptr
-    lda mtmp+1
-    adc #>recipf_lo
-    sta tptr+1
-    ldy #0
-    lda (tptr),y
-    sta mul_b
-    lda tptr+1
-    clc
-    adc #4              ; recipf_hi = recipf_lo + 1KB
-    sta tptr+1
-    lda (tptr),y
-    sta mul_b+1
-    jsr mul16u
-    ; ratio index = (min * recip) >> 15, clamped to 255
-    lda mul_r+3
-    bne @imax
-    lda mul_r+2
-    bmi @imax
-    lda mul_r+1
-    asl                 ; C = result bit 15
-    lda mul_r+2
-    rol
-    jmp @fold
-@imax:
-    lda #255
-@fold:
-    ; fall through into angle_fold
+    adc ttz
+    sec
+    sbc ttx
+    cmp #102
+    bcs @angle_zero
+    tay
+    lda atan_log_tbl,y
+    jmp angle_fold_base
+@angle_zero:
+    lda #0
+    jmp angle_fold_base
 
 ; angle_fold: A = ratio index (0..255) -> A = octant-folded angle, C clear.
 ; Uses at_sx/at_sy/at_sw set by the caller.
 angle_fold:
     tay
     lda atan_tbl,y      ; 0..32 (first half-octant angle)
+angle_fold_base:
     sta mtmp+2
     lda at_sw
     beq :+

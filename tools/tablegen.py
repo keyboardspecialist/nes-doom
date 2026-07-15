@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Math tables for the renderer, emitted as a ca65 source file (LUT00 bank).
+"""Math tables for the renderer, emitted as ca65 LUT00/LUT01 data.
 
 Fixed-point contracts (shared with src/render.s):
   world coords      s11.4 (16-bit signed, value = units * 16)
@@ -22,6 +22,18 @@ def byte_rows(vals):
     return "\n".join(out)
 
 
+def log2_mantissa_table():
+    """Q4 log2(m/128) for normalized unsigned mantissas 128..255."""
+    return [math.floor(16 * math.log2(m / 128) + 0.5)
+            for m in range(128, 256)]
+
+
+def atan_log_table():
+    """First-octant BAM-high atan for Q4 log-ratio differences 0..101."""
+    return [math.floor(math.atan(2 ** (-d / 16)) * 256 / (2 * math.pi) + 0.5)
+            for d in range(102)]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-o", "--out", required=True)
@@ -32,9 +44,10 @@ def main():
     recipf = [32767 if z < 16 else min(32767, round(524288 / z)) for z in range(1024)]
     recip_col = [0] + [min(65535, 65536 // n) for n in range(1, 256)]
 
-    # atan_tbl[i] = atan(i/256) in BAM high-byte units (256/circle), 0..32.
-    # Used by atan2_hi: ratio = min * recipf[max>>4] >> 15 (division-free).
+    # atan_tbl retains the exact ratio-index contract used by atan2_pg.
     atan_v = [round(math.atan(i / 256) * 256 / (2 * math.pi)) for i in range(256)]
+    log2_mant = log2_mantissa_table()
+    atan_log = atan_log_table()
 
     # angcol_tbl[a_rel + 36] = screen column of view-relative angle a_rel
     # (BAM hi units, CCW positive): col = 16 - 16*tan(a), clamped [0, 32].
@@ -69,6 +82,7 @@ def main():
         f.write('.export sin_lo, sin_hi, recipf_lo, recipf_hi\n')
         f.write('.export recip_col_lo, recip_col_hi, hclass_tbl, light_tbl, light2_tbl\n')
         f.write('.export wtop_tbl, wbot_tbl, atan_tbl, angcol_tbl\n')
+        f.write('.export log2_mant, atan_log_tbl\n')
         f.write('.segment "LUT00"\n')
         for name, vals in (
             ("sin_lo", [v & 0xFF for v in sin_v]),
@@ -86,6 +100,12 @@ def main():
             ("angcol_tbl", angcol),
         ):
             f.write(f"{name}:\n{byte_rows(vals)}\n")
+        # atan2_hi is only called after the full-map geometry window has been
+        # restored to common LUT01. Keeping these compact tables here avoids
+        # pressure on the nearly full projection-table bank.
+        f.write('.segment "LUT01"\n')
+        f.write(f"log2_mant:\n{byte_rows(log2_mant)}\n")
+        f.write(f"atan_log_tbl:\n{byte_rows(atan_log)}\n")
     print(f"wrote {args.out}")
 
 

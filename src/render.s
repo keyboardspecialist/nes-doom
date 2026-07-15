@@ -57,6 +57,13 @@
 vang:    .res 256           ; per-vertex view angle (BAM hi-byte)
 vstamp:  .res 256           ; generation when this vertex was computed
 vflags:  .res 256           ; bit 7: too close for a reliable angle
+.ifdef FULL_E1M1
+hvang:       .res 8          ; direct-mapped cache for vertex indices >= 256
+hvindex_lo:  .res 8
+hvindex_hi:  .res 8
+hvstamp:     .res 8
+hvflags:     .res 8          ; bit 7: cached too-close result
+.endif
 move_dx:    .res 2
 move_dy:    .res 2
 move_dx_total: .res 2
@@ -210,6 +217,13 @@ render_frame:
     sta vstamp,x
     inx
     bne @clear_vstamp
+.ifdef FULL_E1M1
+    ldx #7
+@clear_hvstamp:
+    sta hvstamp,x
+    dex
+    bpl @clear_hvstamp
+.endif
     inc vang_gen
 @cache_ready:
     jsr render_bsp
@@ -2210,19 +2224,36 @@ set_texptrs:
 ; ---------------------------------------------------------------------------
 ; vert_angle: A/X = vertex index high/low. Returns
 ; A = view angle of the vertex (BAM hi-byte) with C clear, or C set when the
-; vertex is too close for a reliable atan. Cached per pass in vang/vdone/
-; vnear so shared seg endpoints cost one atan per frame.
+; vertex is too close for a reliable atan. Low indices use the 256-entry
+; generation cache; full-map high indices use a tagged eight-entry side cache.
 ; ---------------------------------------------------------------------------
 vert_angle:
     sta vmask
     stx vtmp
 .ifdef FULL_E1M1
     ora #0
-    beq :+
+    beq @low_lookup
     ldy #1
     sty FULL_HIGH_VERTEX_SEEN
+    lda vtmp
+    eor vmask
+    and #7
+    tax
+    lda hvstamp,x
+    cmp vang_gen
     bne @compute_uncached
-:
+    lda hvindex_lo,x
+    cmp vtmp
+    bne @compute_uncached
+    lda hvindex_hi,x
+    cmp vmask
+    bne @compute_uncached
+    lda hvflags,x
+    bmi @near
+    lda hvang,x
+    clc
+    rts
+@low_lookup:
 .endif
     lda vstamp,x
     cmp vang_gen
@@ -2294,6 +2325,22 @@ vert_angle:
     rts
 .ifdef FULL_E1M1
 @uncached_ok:
+    pha
+    lda vtmp
+    eor vmask
+    and #7
+    tax
+    lda vtmp
+    sta hvindex_lo,x
+    lda vmask
+    sta hvindex_hi,x
+    lda #0
+    sta hvflags,x
+    pla
+    sta hvang,x
+    lda vang_gen         ; publish the cache entry last
+    sta hvstamp,x
+    lda hvang,x
     clc
     rts
 .endif
@@ -2309,6 +2356,18 @@ vert_angle:
     rts
 .ifdef FULL_E1M1
 @uncached_near:
+    lda vtmp
+    eor vmask
+    and #7
+    tax
+    lda vtmp
+    sta hvindex_lo,x
+    lda vmask
+    sta hvindex_hi,x
+    lda #$80
+    sta hvflags,x
+    lda vang_gen
+    sta hvstamp,x
     sec
     rts
 .endif
