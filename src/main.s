@@ -13,6 +13,8 @@
 .ifdef E1M1
     .import hud_nt, hud_ex, sec_pal, sprite_palettes
     .import init_oam_set
+    .import show_title
+    .import audio_init
     .import thing_x_lo, thing_x_hi, thing_y_lo, thing_y_hi, thing_kind
     .import monster_thing_idx, monster_spawn_ss
     .import MAP_THING_COUNT, MONSTER_COUNT
@@ -72,6 +74,9 @@ reset:
 
     jsr mmc5_init
     jsr exram_selftest  ; leaves ExRAM zeroed, mode %10
+.ifdef E1M1
+    jsr show_title
+.endif
 
 .ifdef M2DEMO
     ; rows 0-9 written here in mode %10 during forced blank; the line-160 IRQ
@@ -220,6 +225,7 @@ reset:
     jsr ppu_init
 
 .ifdef E1M1
+    jsr audio_init
     ; Seed every weapon-frame page in the two compose-owned sets and the
     ; initial stable display set.
     lda #>OAMA
@@ -241,14 +247,6 @@ reset:
     adc WEAPON_FRAME
     sta $4014           ; prime the first frame; NMI refreshes OAM thereafter
 
-    ; A short noise report is triggered for each shot. Frame IRQs and DMC
-    ; remain disabled; the length counter silences the report automatically.
-    lda #$1B
-    sta $400C
-    lda #$04
-    sta $400E
-    lda #$08
-    sta $4015
 .endif
 
     ; rendering on

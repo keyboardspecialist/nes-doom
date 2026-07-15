@@ -41,7 +41,7 @@ end
 
 emu.addEventCallback(function()
   polls = polls + 1
-  emu.setInput({a = frames == 60}, 0) -- exactly one NMI poll
+  emu.setInput({start = frames < 10, a = frames == 60}, 0) -- exactly one NMI poll
 end, emu.eventType.inputPolled)
 
 pcall(function()

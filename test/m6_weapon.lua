@@ -58,7 +58,7 @@ pcall(function()
 end)
 
 emu.addEventCallback(function()
-  emu.setInput({a = frames >= 120 and frames < 123}, 0)
+  emu.setInput({start = frames < 10, a = frames >= 120 and frames < 123}, 0)
 end, emu.eventType.inputPolled)
 
 emu.addEventCallback(function()
@@ -89,7 +89,8 @@ emu.addEventCallback(function()
   if frames < 280 then return end
   local mt = emu.memType.nesDebug
   if emu.read(0x03, mt) ~= 0x1E then return fail("view PPUMASK shadow is not $1E") end
-  if dmaBad or dmaCount < frames - 6 or dmaCount > frames + 2 then
+  -- TITLEPIC holds the first few frames without gameplay OAM DMA.
+  if dmaBad or dmaCount < frames - 12 or dmaCount > frames + 2 then
     return fail(string.format("expected one published-set weapon DMA/frame, got %d/%d", dmaCount, frames))
   end
   for i, value in ipairs({0, 1, 2, 3, 4, 5, 6, 7}) do

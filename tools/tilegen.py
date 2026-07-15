@@ -308,6 +308,14 @@ WEAPON_PATCH_GEOMETRY = {
     "PISGC0": (42, 52, 102, 108),
     "PISFA0": (26, 24, 115, 96),
 }
+TITLE_CHR_WINDOW = 2
+TITLE_CHR_BASE_BANK = TITLE_CHR_WINDOW * 64
+TITLE_PALETTES = [
+    0x0F, 0x06, 0x16, 0x26,     # reds
+    0x0F, 0x07, 0x17, 0x27,     # browns/oranges
+    0x0F, 0x01, 0x11, 0x21,     # blues
+    0x0F, 0x00, 0x10, 0x20,     # grays
+]
 
 
 def sprite_tile_byte(pattern):
@@ -980,7 +988,7 @@ def slice_banks(strips, max_cls, fixed_flat=None):
 
 def write_luts(path, slice_tile, slice_bank, ntex, max_cls, vperiod,
                bg_palettes, hud=None, sec_pal=None, vhalf=None,
-               sprite_meta=None):
+               sprite_meta=None, title=None):
     bases = [min(t, 15) * SLICES_PER_TEX for t in range(16)]
     tables = [("slice_tile", slice_tile), ("slice_bank", slice_bank),
               ("tex_base_lo", [b & 0xFF for b in bases]),
@@ -1023,6 +1031,8 @@ def write_luts(path, slice_tile, slice_bank, ntex, max_cls, vperiod,
             f.write(".export barrel_exp_tile, barrel_exp_attr\n")
         if sec_pal:
             f.write(".export sec_pal\n")
+        if title:
+            f.write(".export title_nt, title_ex, title_palettes\n")
         f.write('.segment "LUT00"\n')
         for name, vals in tables:
             f.write(f"{name}:\n")
@@ -1082,6 +1092,14 @@ def write_luts(path, slice_tile, slice_bank, ntex, max_cls, vperiod,
                          "weapon_frame_pattern_count", "weapon_chr_page_lo",
                          "weapon_chr_page_hi", "weapon_scan_count", "weapon_oam"):
                 vals = sprite_meta[name]
+                f.write(f"{name}:\n")
+                for i in range(0, len(vals), 16):
+                    f.write("    .byte " + ", ".join(
+                        f"${v:02X}" for v in vals[i:i+16]) + "\n")
+        if title:
+            f.write('.segment "TITLE"\n')
+            for name, vals in (("title_nt", title[0]), ("title_ex", title[1]),
+                               ("title_palettes", title[2])):
                 f.write(f"{name}:\n")
                 for i in range(0, len(vals), 16):
                     f.write("    .byte " + ", ".join(
@@ -1196,6 +1214,70 @@ def build_hud(wadpath, bg_palettes, hud_bank):
                 hud_ex[cell] = hud_bank | (1 << 6)
     assert len(tiles) <= 256, f"HUD needs {len(tiles)} tiles"
     return tiles, hud_nt, hud_ex, glyph_top, glyph_bottom
+
+
+def build_title(wadpath):
+    """Scale TITLEPIC to a centered 256x200 image and quantize each tile to
+    one of four fixed NES ramps. Return packed CHR, nametable, ExAttr, palette."""
+    try:
+        import wadlib
+    except ModuleNotFoundError:
+        from tools import wadlib
+
+    wad = wadlib.Wad(wadpath)
+    playpal = wadlib.playpal(wad)
+    width, height, _left, _top, source = wadlib.decode_picture(wad, "TITLEPIC")
+    rgb = [[playpal[p] if p is not None else NES_PAL[0x0F] for p in row]
+           for row in source]
+    scaled = box_resample(rgb, 256, 200)
+    canvas = [[NES_PAL[0x0F]] * 256 for _ in range(240)]
+    for y, row in enumerate(scaled):
+        canvas[y + 20] = row
+
+    palettes = [[NES_PAL[TITLE_PALETTES[p * 4 + c]] for c in range(4)]
+                for p in range(4)]
+    unique = {}
+    tiles = []
+    nametable = []
+    exattr = []
+    for ty in range(30):
+        for tx in range(32):
+            pixels = [canvas[ty * 8 + y][tx * 8 + x]
+                      for y in range(8) for x in range(8)]
+            best_palette = 0
+            best_error = None
+            for p, colors in enumerate(palettes):
+                error = sum(min((rgbv[0] - color[0]) ** 2
+                                + (rgbv[1] - color[1]) ** 2
+                                + (rgbv[2] - color[2]) ** 2
+                                for color in colors) for rgbv in pixels)
+                if best_error is None or error < best_error:
+                    best_palette, best_error = p, error
+            colors = palettes[best_palette]
+            indexed = []
+            for y in range(8):
+                row = []
+                for x in range(8):
+                    rgbv = pixels[y * 8 + x]
+                    row.append(min(range(4), key=lambda c:
+                        (rgbv[0] - colors[c][0]) ** 2
+                        + (rgbv[1] - colors[c][1]) ** 2
+                        + (rgbv[2] - colors[c][2]) ** 2))
+                indexed.append(row)
+            tile = encode_tile(indexed)
+            if tile not in unique:
+                unique[tile] = len(tiles)
+                tiles.append(tile)
+            pattern = unique[tile]
+            if pattern >= 4 * BANK_TILES:
+                raise ValueError("TITLEPIC needs more than four CHR banks")
+            nametable.append(pattern & 0xFF)
+            exattr.append((pattern // BANK_TILES) | (best_palette << 6))
+
+    chr_data = b"".join(tiles)
+    banks = max(1, (len(tiles) + BANK_TILES - 1) // BANK_TILES)
+    chr_data = chr_data.ljust(banks * BANK_BYTES, b"\0")
+    return chr_data, nametable, exattr, TITLE_PALETTES, len(tiles), (width, height)
 
 
 def edge_bank():
@@ -1344,6 +1426,7 @@ def main():
     hud = None
     hud_bank_data = None
     sprite_meta = None
+    title = None
     if args.wad:
         tiles, hud_nt, hud_ex, glyph_top, glyph_bottom = build_hud(
             args.wad, bg_palettes, flat_bank + 1)
@@ -1374,8 +1457,15 @@ def main():
         # to physical 4KB bank 125. Keep the window-0 copy for diagnostics.
         data = data.ljust(125 * BANK_BYTES, b"\0") + hud_bank_data
         assert len(data) == 126 * BANK_BYTES
+        title_chr, title_nt, title_ex, title_palettes, title_tiles, source_size = \
+            build_title(args.wad)
+        data = data.ljust(TITLE_CHR_BASE_BANK * BANK_BYTES, b"\0") + title_chr
+        title = (title_nt, title_ex, title_palettes)
+        print(f"title: {source_size[0]}x{source_size[1]}, {title_tiles} unique tiles, "
+              f"{len(title_chr) // BANK_BYTES} CHR banks at {TITLE_CHR_BASE_BANK}")
     write_luts(args.luts or "assets/build/luts.s", st, sb, len(strips),
-               max_cls, vperiod, bg_palettes, hud, sec_pal, vhalf, sprite_meta)
+               max_cls, vperiod, bg_palettes, hud, sec_pal, vhalf, sprite_meta,
+               title)
     with open(args.out, "wb") as f:
         f.write(data)
     print(f"wrote {args.out}: {len(data)} bytes, {used} tiles, "

@@ -12,6 +12,7 @@ from tools.tilegen import (
     WORLD_PATTERN_CAP,
     build_hud,
     build_sprites,
+    build_title,
     sprite_tile_byte,
     write_luts,
 )
@@ -24,6 +25,7 @@ class SpriteTest(unittest.TestCase):
     def setUpClass(cls):
         cls.patterns, cls.meta = build_sprites("Doom1.WAD")
         cls.hud = build_hud("Doom1.WAD", [], 61)
+        cls.title = build_title("Doom1.WAD")
 
     @staticmethod
     def pattern_from_tile(tile):
@@ -280,12 +282,28 @@ class SpriteTest(unittest.TestCase):
                             for index, tile in enumerate(hud_nt)
                             if tile in nonblank_tiles))
 
+    def test_titlepic_chr_and_extended_attributes(self):
+        chr_data, nametable, exattr, palettes, tile_count, source_size = self.title
+        self.assertEqual(source_size, (320, 200))
+        self.assertEqual(tile_count, 758)
+        self.assertEqual(len(chr_data), 3 * 4096)
+        self.assertEqual((len(nametable), len(exattr)), (960, 960))
+        self.assertTrue(all(0 <= tile <= 255 for tile in nametable))
+        self.assertEqual({value & 0x3F for value in exattr}, {0, 1, 2})
+        self.assertTrue(all((value >> 6) < 4 for value in exattr))
+        patterns = {(attribute & 0x3F) * 256 + tile
+                    for tile, attribute in zip(nametable, exattr)}
+        self.assertEqual(patterns, set(range(tile_count)))
+        self.assertEqual(len(palettes), 16)
+        self.assertEqual(palettes[0::4], [0x0F] * 4)
+
     def test_generated_lut_contract_and_segments(self):
         hud = self.hud[1:]
+        title = self.title[1:4]
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "luts.s"
             write_luts(path, [], [], 0, [], [], [0] * 16,
-                       hud=hud, sprite_meta=self.meta)
+                       hud=hud, sprite_meta=self.meta, title=title)
             source = path.read_text()
 
         exports = "\n".join(line for line in source.splitlines()
@@ -299,7 +317,8 @@ class SpriteTest(unittest.TestCase):
                        "weapon_scan_count", "weapon_oam",
                        "barrel_exp_meta_first", "barrel_exp_meta_count",
                        "barrel_exp_dx", "barrel_exp_dy",
-                       "barrel_exp_tile", "barrel_exp_attr"):
+                       "barrel_exp_tile", "barrel_exp_attr",
+                       "title_nt", "title_ex", "title_palettes"):
             self.assertIn(symbol, exports)
         for symbol in ("WEAPON_FRAME_COUNT", "WEAPON_SLOT_CAP",
                        "WEAPON_SPRITE_COUNT"):
@@ -313,6 +332,7 @@ class SpriteTest(unittest.TestCase):
         lut00 = source.index('.segment "LUT00"')
         lut01 = source.index('.segment "LUT01"')
         fixed = source.index('.segment "FIXED"')
+        title_segment = source.index('.segment "TITLE"')
         self.assertLess(lut00, source.index("hud_glyph_top:"))
         self.assertLess(source.index("hud_glyph_bottom:"), lut01)
         self.assertLess(lut01, source.index("sprite_palettes:"))
@@ -325,6 +345,9 @@ class SpriteTest(unittest.TestCase):
         self.assertLess(fixed, source.index("weapon_frame_first:"))
         self.assertLess(fixed, source.index("weapon_scan_count:"))
         self.assertLess(fixed, source.index("weapon_oam:"))
+        self.assertLess(source.index("weapon_oam:"), title_segment)
+        self.assertLess(title_segment, source.index("title_nt:"))
+        self.assertLess(source.index("title_ex:"), source.index("title_palettes:"))
 
 
 if __name__ == "__main__":

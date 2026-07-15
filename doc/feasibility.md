@@ -538,9 +538,17 @@ Headroom that did remain, both landed this session:
   BROWN1 to 9.
 
 Still on the table, costed: class 18 (halves the worst vertical rescale
-seam, ~1-2 slots after pruning), dithered floor-shade tiles (cheap), and
-the real frontier — sprites (768KB CHR untouched, separate sprite
-banking).
+seam, ~1-2 slots after pruning) and dithered floor-shade tiles (cheap).
+
+## Music
+
+The WAD build compiles `D_E1M1` from MUS timing into bounded 60 Hz hardware
+commands. Its two polyphonic guitar tracks use the two base and two MMC5 pulse
+channels, bass uses triangle, and percussion combines noise with short DPCM
+kick/snare/tom samples. The complete 96-second loop, period/volume tables, and
+percussion recipes occupy 8,016 bytes in PRG08. Runtime playback performs no
+voice allocation or pitch math and processes at most six channel updates per
+frame. Gameplay noise effects retain priority without interrupting tonal music.
 
 ## Profiling harness (notes)
 
@@ -558,7 +566,7 @@ export screens by printing FNV hashes (or hex pixel rows) to stdout.
 ```
 make            # builds nesdoom.nes (micro-map PoC) + nesdoom-m2.nes
 make e1m1       # builds nesdoom-e1m1.nes from Doom1.WAD (in repo root)
-make test       # M1..M5 in Mesen2 headless testrunner
+make test       # Python checks plus M1..M11 in Mesen2 headless testrunner
 make test-e1m1  # E1M1 structural + performance-envelope test
 ```
 

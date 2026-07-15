@@ -37,9 +37,7 @@ local function composeHash(base)
 end
 
 emu.addEventCallback(function()
-  if frames > 320 and frames <= 650 then
-    emu.setInput({up = true}, 0)
-  end
+  emu.setInput({start = frames < 10, up = frames > 320 and frames <= 650}, 0)
 end, emu.eventType.inputPolled)
 
 emu.addEventCallback(function()

@@ -15,6 +15,7 @@
 .ifdef E1M1
 .import sec_pal, hud_glyph_top, hud_glyph_bottom
 .import weapon_chr_page_lo, weapon_chr_page_hi
+.import audio_tick
 .endif
 .export nmi_handler
 
@@ -35,13 +36,15 @@ nmi_handler:
 .endif
 
     inc frame_cnt
+.ifndef E1M1
     jsr read_input
+.endif
 
 .ifdef E1M1
+    ; Weapon state uses the prior frame's stable sample. Polling immediately
+    ; after OAM DMA gives controller reads a DMC-safe CPU/APU phase.
     jsr update_weapon
     jsr select_weapon_chr
-    jsr update_enemy_sound
-    jsr update_explosion_sound
 
     ; OAM is dynamic RAM and the long letterbox blank exceeds safe retention.
     ; Select the live weapon frame within the published four-page set.
@@ -51,6 +54,7 @@ nmi_handler:
     clc
     adc WEAPON_FRAME
     sta $4014
+    jsr read_input
 .endif
 
 .ifndef M2DEMO
@@ -135,6 +139,11 @@ nmi_handler:
     sta MMC5_IRQ_EN
     lda #0
     sta irq_phase
+.ifdef E1M1
+    ; PPU-critical work is complete. Audio may extend into the pre-render line
+    ; without consuming the tightly budgeted VRAM-write window.
+    jsr audio_tick
+.endif
 
     pla
     tay
@@ -219,42 +228,8 @@ update_weapon:
     sta WEAPON_FRAME
     lda #5
     sta WEAPON_TIMER
-    ; Restore the pistol's noise voice explicitly because an explosion uses
-    ; the same APU channel with a lower, louder report.
-    lda #$1B
-    sta $400C
-    lda #$04
-    sta $400E
-    lda #$18
-    sta $400F
-@done:
-    rts
-
-update_enemy_sound:
-    lda ENEMY_SOUND_PENDING
-    beq @done
-    lda #0
-    sta ENEMY_SOUND_PENDING
-    lda #$18
-    sta $400C
-    lda #$06
-    sta $400E
-    lda #$24
-    sta $400F
-@done:
-    rts
-
-update_explosion_sound:
-    lda EXPLOSION_SOUND_PENDING
-    beq @done
-    lda #0
-    sta EXPLOSION_SOUND_PENDING
-    lda #$1F            ; louder envelope, low noise period, longer report
-    sta $400C
-    lda #$0E
-    sta $400E
-    lda #$30
-    sta $400F
+    lda #1
+    sta PISTOL_SOUND_PENDING
 @done:
     rts
 

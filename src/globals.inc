@@ -80,7 +80,7 @@ STATUS_LINE = 160
 BLANK_LINE  = 199
 VIEW_MASK   = %00011110  ; BG + sprites in the 160-line view
 STATUS_MASK = %00001110  ; BG only below the view
-SPLIT2_CMP  = 36    ; E1M1: phase-1 compare RELATIVE to the counter restart
+SPLIT2_CMP  = 35    ; E1M1: phase-1 compare RELATIVE to the counter restart
                     ; after the line-160 palette-swap blank (measured)
 IRQ_QUOTA = 10
 .ifdef E1M1
@@ -103,6 +103,30 @@ SPRITE_CHR_PAGE = 256 ; first of eight 1KB 8x16 sprite pages
 WORLD_SPRITE_PAGE_COUNT = 6
 WEAPON_SPRITE_PAGE_FIRST = 6
 HUD_CHR_WINDOW = 1  ; line-160 split: low ExAttr bank 61 -> physical bank 125
+TITLE_CHR_WINDOW = 2 ; title banks 128-130, selected before gameplay starts
+TITLE_PRG_BANK = $87
+MUSIC_PRG_BANK = $88
+
+; Audio state uses the unused tail of PRG-RAM. It is fixed-address so Mesen
+; timing tests can inspect playback without depending on linker symbols.
+MUSIC_DELAY = $7F00
+MUSIC_PTR_LO = $7F01
+MUSIC_PTR_HI = $7F02
+MUSIC_SKIP_COUNT = $7F03
+MUSIC_LOOP_COUNT = $7F04
+PISTOL_SOUND_PENDING = $7F05
+NOISE_HOLD = $7F06
+AUDIO_MASK = $7F07
+AUDIO_CMD = $7F08
+AUDIO_SAVE_PTR = $7F09
+AUDIO_P0_HI = $7F0B
+AUDIO_P1_HI = $7F0C
+AUDIO_M0_HI = $7F0D
+AUDIO_M1_HI = $7F0E
+AUDIO_DESIRED_HI = $7F0F
+MUSIC_EVENT_COUNT = $7F10
+DPCM_TRIGGER_COUNT = $7F11
+DPCM_HOLD = $7F12
 .else
 FLAT_BANK = 12      ; 2 synthetic textures, 6 banks each
 .endif

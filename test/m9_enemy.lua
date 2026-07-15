@@ -59,7 +59,7 @@ local function enemyOamRows()
 end
 
 emu.addEventCallback(function()
-  emu.setInput({a = wantFire}, 0)
+  emu.setInput({start = frames < 10, a = wantFire}, 0)
 end, emu.eventType.inputPolled)
 
 pcall(function()

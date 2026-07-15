@@ -132,14 +132,12 @@ irq_handler:
 @spin:
     dex
     bne @spin
+    lda #%00001100      ; exclude NMI before entering transient PPU/ExRAM state
+    sta $2000
     lda #0
     sta $2001           ; letterbox begins
     lda #EXRAM_MODE_RAM
     sta MMC5_EXRAM_MODE
-    ; Keep NMI out of the transient PRG-bank/ExRAM state inside push_run.  If
-    ; this ever reaches vblank, setting bit 7 again below triggers NMI then.
-    lda #%00001100      ; NMI off, inc-32 for column pushes
-    sta $2000
     lda #IRQ_QUOTA
     sta push_quota
     jsr push_run

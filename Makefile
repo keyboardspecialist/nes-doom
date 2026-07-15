@@ -9,15 +9,15 @@ ROM      := nesdoom.nes
 ROM_M2   := nesdoom-m2.nes
 ROM_E1M1 := nesdoom-e1m1.nes
 ROM_FULL := nesdoom-e1m1-full.nes
-SRCS   := header main nmi irq vram_push math render bsp enemy chr
+SRCS   := header main title nmi irq vram_push math render bsp enemy audio chr
 GENS   := tables luts map
 OBJS   := $(addprefix obj/,$(addsuffix .o,$(SRCS) $(GENS)))
 OBJSM2 := $(addprefix obj-m2/,$(addsuffix .o,$(SRCS) $(GENS)))
-OBJSE1 := $(addprefix obj-e1m1/,$(addsuffix .o,$(SRCS) $(GENS)))
-OBJSFULL := $(addprefix obj-e1m1-full/,$(addsuffix .o,$(SRCS) $(GENS)))
+OBJSE1 := $(addprefix obj-e1m1/,$(addsuffix .o,$(SRCS) $(GENS) music_data))
+OBJSFULL := $(addprefix obj-e1m1-full/,$(addsuffix .o,$(SRCS) $(GENS) music_data))
 INCS   := src/zeropage.inc src/mmc5.inc src/globals.inc
 
-.PHONY: all clean e1m1 e1m1-full test test-python test-m1 test-m2 test-m3 test-m4 test-m5 test-m6 test-m7 test-m8 test-m9 test-e1m1 test-e1m1-full
+.PHONY: all clean e1m1 e1m1-full test test-python test-m1 test-m2 test-m3 test-m4 test-m5 test-m6 test-m7 test-m8 test-m9 test-m10 test-m11 test-e1m1 test-e1m1-full
 
 all: $(ROM) $(ROM_M2)
 
@@ -63,6 +63,9 @@ obj-e1m1/luts.o: assets/build/e1m1-luts.s | obj-e1m1
 obj-e1m1/tables.o: assets/build/tables.s | obj-e1m1
 	$(CA65) -g -D E1M1 -o $@ $<
 
+obj-e1m1/music_data.o: assets/build/e1m1-music.s | obj-e1m1
+	$(CA65) -g -D E1M1 -o $@ $<
+
 obj-e1m1-full/map.o: assets/build/e1m1-full-map.s | obj-e1m1-full
 	$(CA65) -g -D E1M1 -D FULL_E1M1 -o $@ $<
 
@@ -70,6 +73,9 @@ obj-e1m1-full/luts.o: assets/build/e1m1-full-luts.s | obj-e1m1-full
 	$(CA65) -g -D E1M1 -D FULL_E1M1 -o $@ $<
 
 obj-e1m1-full/tables.o: assets/build/tables.s | obj-e1m1-full
+	$(CA65) -g -D E1M1 -D FULL_E1M1 -o $@ $<
+
+obj-e1m1-full/music_data.o: assets/build/e1m1-music.s | obj-e1m1-full
 	$(CA65) -g -D E1M1 -D FULL_E1M1 -o $@ $<
 
 obj/chr.o obj-m2/chr.o: assets/build/chr-game.bin assets/build/chr-test.bin
@@ -98,6 +104,9 @@ assets/build/e1m1-full-map.s assets/build/texlist-full.json: tools/mapconv.py to
 	$(PY) tools/mapconv.py --wad $(WAD) --map E1M1 --full \
 	    --texlist assets/build/texlist-full.json -o assets/build/e1m1-full-map.s
 
+assets/build/e1m1-music.s: tools/musicgen.py tools/wadlib.py $(WAD) | assets/build
+	$(PY) tools/musicgen.py --wad $(WAD) --lump D_E1M1 -o $@
+
 assets/build/chr-e1m1.bin assets/build/e1m1-luts.s: tools/tilegen.py tools/wadlib.py assets/build/texlist.json $(WAD)
 	$(PY) tools/tilegen.py --wad $(WAD) --texlist assets/build/texlist.json \
 	    -o assets/build/chr-e1m1.bin --luts assets/build/e1m1-luts.s
@@ -112,7 +121,7 @@ assets/build:
 test: test-python test-m1 test-m2 test-m3 test-m4 test-m5
 
 ifneq ($(wildcard $(WAD)),)
-test: test-e1m1 test-e1m1-full test-m6 test-m7 test-m8 test-m9
+test: test-e1m1 test-e1m1-full test-m6 test-m7 test-m8 test-m9 test-m10 test-m11
 endif
 
 test-python:
@@ -150,6 +159,12 @@ test-m8: $(ROM_E1M1)
 
 test-m9: $(ROM_FULL)
 	sh test/run_mesen.sh $(ROM_FULL) test/m9_enemy.lua
+
+test-m10: $(ROM_E1M1)
+	sh test/run_mesen.sh $(ROM_E1M1) test/m10_title.lua
+
+test-m11: $(ROM_E1M1)
+	sh test/run_mesen.sh $(ROM_E1M1) test/m11_music.lua
 
 clean:
 	rm -rf obj obj-m2 obj-e1m1 assets/build \

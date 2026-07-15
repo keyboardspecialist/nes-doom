@@ -14,6 +14,10 @@ local function write16(address, value)
 end
 
 emu.addEventCallback(function()
+  emu.setInput({start = frames < 10}, 0)
+end, emu.eventType.inputPolled)
+
+emu.addEventCallback(function()
   frames = frames + 1
   MT = emu.memType.nesDebug
   if done then return end

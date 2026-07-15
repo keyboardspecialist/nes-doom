@@ -28,6 +28,16 @@ MMC5_MULT_A     = $5205     ; unsigned 8x8 -> 16, result readable immediately
 MMC5_MULT_B     = $5206     ; write B here; read $5205=lo $5206=hi
 EXRAM           = $5C00     ; 1KB
 
+MMC5_PULSE1_CTRL = $5000
+MMC5_PULSE1_LO   = $5002
+MMC5_PULSE1_HI   = $5003
+MMC5_PULSE2_CTRL = $5004
+MMC5_PULSE2_LO   = $5006
+MMC5_PULSE2_HI   = $5007
+MMC5_PCM_CTRL    = $5010
+MMC5_PCM_DATA    = $5011
+MMC5_AUDIO_EN    = $5015
+
 EXRAM_MODE_EXATTR = %01
 EXRAM_MODE_RAM    = %10
 
