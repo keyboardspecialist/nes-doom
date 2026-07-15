@@ -101,7 +101,7 @@ emu.addEventCallback(function()
     local px = emu.read(0x30, MT) + 256 * emu.read(0x31, MT)
     local py = emu.read(0x32, MT) + 256 * emu.read(0x33, MT)
     print(string.format("after move: px=%04X py=%04X", px, py))
-    if px == 0x1000 and py == 0x0C00 then
+    if px == 0x1000 and py == 0x0800 then
       return fail("movement input had no effect")
     end
     local canary = emu.read(0x8F, MT)

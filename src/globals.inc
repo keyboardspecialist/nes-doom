@@ -56,6 +56,19 @@ EXPLOSION_OAM_COUNT = $6AFE
 OAMA = $6B00
 OAMB = $6F00
 OAMC = $7300
+; Dynamic map state. Door ceilings are indexed directly by sector byte.
+SECTOR_CEIL_RT = $7700      ; 256-byte mutable ceiling shadow
+DOOR_POS = $7800            ; 8 bytes: rise above closed ceiling
+DOOR_STATE = $7808          ; 0 closed, 1 opening, 2 waiting, 3 closing
+DOOR_PHASE = $7810          ; half-speed fractional accumulator
+DOOR_WAIT = $7818           ; open hold countdown in video frames
+DOOR_PASSABLE = $7820       ; collision gate, one byte per door
+DOOR_LAST_FRAME = $7828
+DOOR_ELAPSED = $7829
+DOOR_BEST_ID = $782A
+DOOR_BEST_LO = $782B
+DOOR_BEST_HI = $782C
+DOOR_USE_INDEX = $782D
 
 ; Pusher code banks (PRG02/PRG03 mapped at $8000 via $5114; bit7 = ROM)
 PUSH_BANK_A = $82
@@ -66,6 +79,7 @@ MAP_COMMON_BANK = $81   ; $A000 window in the untrimmed E1M1 build
 MAP_SEG0_BANK = $84
 MAP_SEG1_BANK = $85
 MAP_GEOM_BANK = $86
+DOOR_CODE_BANK = $8D
 
 ; Screen split: view rows 0-19 (lines 0-159), status bar rows 20-24 (lines
 ; 160-199), letterbox lines 200-240. A column costs ~410 cycles including

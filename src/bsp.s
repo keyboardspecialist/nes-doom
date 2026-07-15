@@ -22,7 +22,7 @@
 .import ss_first_lo, ss_first_hi, ss_count, ss_sector
 .import ss_bx1, ss_by1, ss_bx2, ss_by2
 .import MAP_ROOT_NODE, REJECT_ROWB, reject_tbl
-.export render_bsp, find_sector, find_subsector, ceil_clip, floor_clip
+.export render_bsp, find_sector, find_subsector, load_seg, ceil_clip, floor_clip
 
 .segment "BSS"
 ceil_clip:  .res 32
@@ -493,39 +493,7 @@ draw_subsector:         ; X = subsector index
     lda ss_count,x
     sta ss_n
 @sl:
-.ifdef FULL_E1M1
-    jsr stage_seg
-.else
-    ; wall_ptr = map_segs + seg_idx*10  (idx*2 + idx*8)
-    lda ss_idx
-    sta wall_ptr
-    lda ss_idx_hi
-    sta wall_ptr+1
-    asl wall_ptr
-    rol wall_ptr+1      ; *2
-    lda wall_ptr
-    sta rt_acc
-    lda wall_ptr+1
-    sta rt_acc+1
-    asl wall_ptr
-    rol wall_ptr+1
-    asl wall_ptr
-    rol wall_ptr+1      ; *8
-    lda wall_ptr
-    clc
-    adc rt_acc
-    sta wall_ptr
-    lda wall_ptr+1
-    adc rt_acc+1
-    sta wall_ptr+1
-    lda wall_ptr
-    clc
-    adc #<map_segs
-    sta wall_ptr
-    lda wall_ptr+1
-    adc #>map_segs
-    sta wall_ptr+1
-.endif
+    jsr load_seg
     jsr do_seg
     inc ss_idx
     bne :+
@@ -534,10 +502,10 @@ draw_subsector:         ; X = subsector index
     bne @sl
     rts
 
+load_seg:
 .ifdef FULL_E1M1
 ; Copy one 12-byte seg record from its ROM bank so do_seg can freely switch
 ; the $A000 window while fetching 16-bit vertices and common map metadata.
-stage_seg:
     lda ss_idx
     sta wall_ptr
     lda ss_idx_hi
@@ -595,6 +563,37 @@ stage_seg:
     lda #<wall_record
     sta wall_ptr
     lda #>wall_record
+    sta wall_ptr+1
+    rts
+.else
+    ; wall_ptr = map_segs + seg_idx*10  (idx*2 + idx*8)
+    lda ss_idx
+    sta wall_ptr
+    lda ss_idx_hi
+    sta wall_ptr+1
+    asl wall_ptr
+    rol wall_ptr+1      ; *2
+    lda wall_ptr
+    sta rt_acc
+    lda wall_ptr+1
+    sta rt_acc+1
+    asl wall_ptr
+    rol wall_ptr+1
+    asl wall_ptr
+    rol wall_ptr+1      ; *8
+    lda wall_ptr
+    clc
+    adc rt_acc
+    sta wall_ptr
+    lda wall_ptr+1
+    adc rt_acc+1
+    sta wall_ptr+1
+    lda wall_ptr
+    clc
+    adc #<map_segs
+    sta wall_ptr
+    lda wall_ptr+1
+    adc #>map_segs
     sta wall_ptr+1
     rts
 .endif

@@ -12,8 +12,9 @@ Two modes:
 
 Engine data formats (must match src/bsp.s + src/render.s):
   vertex   4B  x, y                       s11.4 words
-  seg     10B  v1, vphase, v2, vphase_low, ulen, u0, tex, tex_low,
-                front, back ($FF = solid). Full maps append v1_hi, v2_hi.
+  seg     10B  v1, vphase, v2, vphase_low, ulen, u0, tex|blocking, tex_low,
+                front, back ($FF = solid). tex bit 7 marks player collision;
+                full maps append v1_hi, v2_hi.
   node    16B  px, py, pdx, pdy (s11.4), c0_idx, c0_isleaf, c1_idx, c1_isleaf,
                bbox x1,y1,x2,y2 (page bytes = s11.4 >> 8, subtree union)
                side 0 (child 0) when (x-px)*pdy - (y-py)*pdx >= 0
@@ -41,7 +42,8 @@ def words(v):
 
 
 def emit_map(path, verts, segs, nodes, subsectors, sectors, root, player,
-             eye_rel, reject=None, things=None, full=False):
+             eye_rel, reject=None, things=None, doors=None, door_uses=None,
+             full=False):
     vdata = []
     for (x, y) in verts:
         vdata += words(x) + words(y)
@@ -81,6 +83,9 @@ def emit_map(path, verts, segs, nodes, subsectors, sectors, root, player,
             thing_x.append(x)
             thing_y.append(y)
             thing_kind.append(kind)
+    doors = doors or []
+    door_uses = door_uses or []
+    assert len(doors) <= 7
     # per-subsector bbox (page bytes) — leaf-level culling is much tighter
     # than the node unions
     ss_bb = []
@@ -110,7 +115,8 @@ def emit_map(path, verts, segs, nodes, subsectors, sectors, root, player,
     total = (len(vdata) + len(sdata) + len(ndata) + 8 * len(subsectors)
              + 3 * len(sectors) + len(rej) + 16 * len(sectors) + 736
              + 2 * len(subsectors) + 5 * len(thing_kind)
-             + 2 * len(monster_thing_idx)
+             + 2 * len(monster_thing_idx) + 3 * len(doors)
+             + 5 * len(door_uses)
              + sprite_lut_reserve)
     if not full:
         assert total <= 8100, (f"map and sector palettes {total}B overflow "
@@ -125,13 +131,15 @@ def emit_map(path, verts, segs, nodes, subsectors, sectors, root, player,
         # The trimmed engine caches every vertex by its byte-sized index.
         assert len(verts) <= 256 and len(segs) <= 800
 
-    # camera clamp bounds (hi-byte compares in update_cam), 32 units inside
+    # Coarse malformed-map fallback only. Real wall collision owns clearance;
+    # a 32-unit inset made retained doors near trimmed-map extrema unreachable.
+    clamp_margin = 8 * 16
     xs = [v[0] for v in verts]
     ys = [v[1] for v in verts]
-    pxmin_h = (min(xs) + 32 * 16) >> 8
-    pxmax_h = (max(xs) - 32 * 16) >> 8
-    pymin_h = (min(ys) + 32 * 16) >> 8
-    pymax_h = (max(ys) - 32 * 16) >> 8
+    pxmin_h = (min(xs) + clamp_margin) >> 8
+    pxmax_h = (max(xs) - clamp_margin) >> 8
+    pymin_h = (min(ys) + clamp_margin) >> 8
+    pymax_h = (max(ys) - clamp_margin) >> 8
 
     px, py, ang = player
     with open(path, "w") as f:
@@ -148,13 +156,18 @@ def emit_map(path, verts, segs, nodes, subsectors, sectors, root, player,
         f.write(".export thing_x_lo, thing_x_hi, thing_y_lo, thing_y_hi, thing_kind\n")
         f.write(".export monster_thing_idx, monster_spawn_ss\n")
         f.write(".export sec_floor, sec_ceil, sec_light\n")
+        f.write(".export door_sector, door_closed, door_open\n")
+        f.write(".export door_use_x_lo, door_use_x_hi, door_use_y_lo, door_use_y_hi, door_use_id\n")
         for name, val in (("MAP_ROOT_NODE", root),
                           ("PLAYER_PX", int(px) & 0xFFFF),
                           ("PLAYER_PY", int(py) & 0xFFFF),
                           ("PLAYER_ANG", int(ang) & 0xFFFF),
                           ("EYE_REL", eye_rel),
                           ("MAP_THING_COUNT", len(thing_kind)),
-                          ("MONSTER_COUNT", len(monster_thing_idx)),
+                           ("MONSTER_COUNT", len(monster_thing_idx)),
+                           ("MAP_SECTOR_COUNT", len(sectors)),
+                           ("DOOR_COUNT", len(doors)),
+                           ("DOOR_USE_COUNT", len(door_uses)),
                           ("REJECT_ROWB", rowb),
                           ("PX_MIN_H", pxmin_h), ("PX_MAX_H", pxmax_h),
                           ("PY_MIN_H", pymin_h), ("PY_MAX_H", pymax_h)):
@@ -194,6 +207,14 @@ def emit_map(path, verts, segs, nodes, subsectors, sectors, root, player,
             ("sec_floor", [v & 0xFF for v in [s[0] for s in sectors]]),
             ("sec_ceil", [v & 0xFF for v in [s[1] for s in sectors]]),
             ("sec_light", [s[2] for s in sectors]),
+            ("door_sector", [d[0] for d in doors]),
+            ("door_closed", [d[1] & 0xFF for d in doors]),
+            ("door_open", [d[2] & 0xFF for d in doors]),
+            ("door_use_x_lo", [u[0] & 0xFF for u in door_uses]),
+            ("door_use_x_hi", [(u[0] >> 8) & 0xFF for u in door_uses]),
+            ("door_use_y_lo", [u[1] & 0xFF for u in door_uses]),
+            ("door_use_y_hi", [(u[1] >> 8) & 0xFF for u in door_uses]),
+            ("door_use_id", [u[2] for u in door_uses]),
             ("reject_tbl", list(rej)),
         ):
             f.write(f"{name}:\n{byte_rows(vals)}\n")
@@ -210,7 +231,8 @@ MICRO_SECTORS = [(0, 128, 0), (0, 96, 2), (16, 128, 1)]  # floor, ceil, light
 def m_seg(v1, v2, tex, front, back=None):
     ln = abs(v2[0] - v1[0]) + abs(v2[1] - v1[1])
     assert 0 < ln <= 255
-    return (v1, v2, ln, 0, tex, tex, front, back)
+    packed_tex = tex | (0x80 if back is None else 0)
+    return (v1, v2, ln, 0, packed_tex, tex, front, back)
 
 
 MICRO_LEAVES = [
@@ -294,6 +316,8 @@ def build_micro():
 # ------------------------------------------------------------------ WAD map --
 SCALE = 0.4          # world units multiplier (keeps s11.4 deltas in int16)
 EYE_WAD = round(41 * SCALE)
+PLAYER_HEIGHT_WAD = 56  # portal checks use raw WAD sector heights
+PLAYER_STEP_WAD = 24
 THING_SKILL_FLAG = 0x02  # medium, until runtime skill selection exists
 MAX_RUNTIME_THINGS = 64
 MAX_RUNTIME_MONSTERS = 8
@@ -319,6 +343,16 @@ def vertical_phase(kind, front_floor, front_ceil, back_floor, back_ceil,
     else:
         raise ValueError(f"unknown wall kind: {kind}")
     return ((anchor + row_offset - top) % tex_height) * 256 // tex_height
+
+
+def line_blocks(flags, front_floor, front_ceil, back_floor=None,
+                back_ceil=None):
+    if back_floor is None or back_ceil is None or flags & 0x0001:
+        return True
+    opening_bottom = max(front_floor, back_floor)
+    opening_top = min(front_ceil, back_ceil)
+    return (opening_top - opening_bottom < PLAYER_HEIGHT_WAD or
+            opening_bottom - front_floor > PLAYER_STEP_WAD)
 
 
 def convert_wad(wadpath, mapname, full=False):
@@ -357,8 +391,11 @@ def convert_wad(wadpath, mapname, full=False):
             tex = up if up != "-" else (mid if mid != "-" else lo)
             texl = lo if lo != "-" else tex
         return {"p1": (x1, y1), "p2": (x2, y2), "ulen": ulen, "u0": u0,
-                "tex": tex, "texl": texl, "front": fs[5], "back": back,
-                "flags": l[2], "rowoff": fs[1]}
+                 "tex": tex, "texl": texl, "front": fs[5], "back": back,
+                 "flags": l[2], "rowoff": fs[1], "special": l[3],
+                 "door_sector": (sides[sl][5]
+                                 if l[3] == 1 and sl not in (0xFFFF, -1)
+                                 else None)}
 
     ss_segs = []
     for (count, first) in m["ssectors"]:
@@ -480,6 +517,33 @@ def convert_wad(wadpath, mapname, full=False):
 
     def s114(wx, wy):
         return (round((wx - cx) * SCALE * 16), round((wy - cy) * SCALE * 16))
+
+    def scale_height(h):
+        return max(-120, min(120, round(h * SCALE)))
+
+    door_old = sorted({sides[l[6]][5] for l in lines
+                       if l[3] == 1 and l[6] not in (0xFFFF, -1)
+                       and sides[l[6]][5] in kept})
+    door_id_of = {sector: i for i, sector in enumerate(door_old)}
+    doors = []
+    door_open_raw = {}
+    for sector in door_old:
+        neighbors = adj.get(sector, ())
+        open_raw = min(m["sectors"][n][1] for n in neighbors) - 4
+        door_open_raw[sector] = open_raw
+        closed = scale_height(m["sectors"][sector][1])
+        doors.append((sec_renum[sector], closed,
+                      max(closed, scale_height(open_raw))))
+    door_uses = []
+    for l in lines:
+        if l[3] != 1 or l[6] in (0xFFFF, -1):
+            continue
+        sector = sides[l[6]][5]
+        if sector not in door_id_of:
+            continue
+        p1, p2 = wverts[l[0]], wverts[l[1]]
+        mx, my = s114((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2)
+        door_uses.append((mx, my, door_id_of[sector]))
 
     verts = []
     vmap = {}
@@ -648,8 +712,24 @@ def convert_wad(wadpath, mapname, full=False):
             kind = "solid" if back is None else "upper"
             vp = vphase(s["tex"], kind)
             vpl = 0 if back is None else vphase(s["texl"], "lower")
+            bf, bc = (None, None) if back is None else m["sectors"][back][:2]
+            blocked = line_blocks(s["flags"], ff, fc, bf, bc)
+            door_id = door_id_of.get(s["door_sector"])
+            if door_id is not None and back is not None:
+                door_sector = s["door_sector"]
+                fc_open = (door_open_raw[door_sector]
+                           if s["front"] == door_sector else fc)
+                bc_open = (door_open_raw[door_sector]
+                           if back == door_sector else bc)
+                if line_blocks(s["flags"], ff, fc_open, bf, bc_open):
+                    door_id = None
+            elif door_id is not None:
+                door_id = None
+            door_bits = 0 if door_id is None else (door_id + 1) << 4
+            tex_slot = (slot(s["tex"]) | door_bits |
+                        (0x80 if blocked else 0))
             segs.append((vid(s["p1"]), vid(s["p2"]), s["ulen"], s["u0"],
-                         slot(s["tex"]), slot(s["texl"]), sec_renum[s["front"]],
+                         tex_slot, slot(s["texl"]), sec_renum[s["front"]],
                          None if back is None else sec_renum[back], vp, vpl))
         subsectors.append((first, len(ss_segs[i]), sec_renum[ss_sector[i]]))
 
@@ -669,8 +749,8 @@ def convert_wad(wadpath, mapname, full=False):
     sectors = []
     for old in sorted(kept):
         f, c, light = m["sectors"][old]
-        fs = max(-120, min(120, round(f * SCALE)))
-        cs = max(-120, min(120, round(c * SCALE)))
+        fs = scale_height(f)
+        cs = scale_height(c)
         lq = max(0, min(3, 3 - (light >> 6)))
         sectors.append((fs, cs, lq))
 
@@ -697,7 +777,7 @@ def convert_wad(wadpath, mapname, full=False):
     print(f"trim: kept {len(kept)}/{len(m['sectors'])} sectors, "
           f"{len(kept_ss)}/{len(ss_segs)} subsectors; textures: {slots}")
     return (verts, segs, nodes, subsectors, sectors, root,
-            (ppx, ppy, pang), EYE_WAD, reject, things), \
+            (ppx, ppy, pang), EYE_WAD, reject, things, doors, door_uses), \
         {"slots": slots, "sec_tex": [dict(c) for c in sec_tex]}
 
 

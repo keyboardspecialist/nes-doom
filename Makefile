@@ -9,7 +9,7 @@ ROM      := nesdoom.nes
 ROM_M2   := nesdoom-m2.nes
 ROM_E1M1 := nesdoom-e1m1.nes
 ROM_FULL := nesdoom-e1m1-full.nes
-SRCS   := header main title nmi irq vram_push math render bsp enemy audio chr
+SRCS   := header main title nmi irq vram_push math render bsp enemy door audio chr
 GENS   := tables luts map
 OBJS   := $(addprefix obj/,$(addsuffix .o,$(SRCS) $(GENS)))
 OBJSM2 := $(addprefix obj-m2/,$(addsuffix .o,$(SRCS) $(GENS)))
@@ -17,7 +17,7 @@ OBJSE1 := $(addprefix obj-e1m1/,$(addsuffix .o,$(SRCS) $(GENS) music_data))
 OBJSFULL := $(addprefix obj-e1m1-full/,$(addsuffix .o,$(SRCS) $(GENS) music_data))
 INCS   := src/zeropage.inc src/mmc5.inc src/globals.inc
 
-.PHONY: all clean e1m1 e1m1-full test test-python test-m1 test-m2 test-m3 test-m4 test-m5 test-m6 test-m7 test-m8 test-m9 test-m10 test-m11 test-e1m1 test-e1m1-full
+.PHONY: all clean e1m1 e1m1-full test test-python test-m1 test-m2 test-m3 test-m4 test-m5 test-m6 test-m7 test-m8 test-m9 test-m10 test-m11 test-m12 test-m13 test-e1m1 test-e1m1-full
 
 all: $(ROM) $(ROM_M2)
 
@@ -118,10 +118,10 @@ assets/build/chr-e1m1-full.bin assets/build/e1m1-full-luts.s: tools/tilegen.py t
 assets/build:
 	mkdir -p assets/build
 
-test: test-python test-m1 test-m2 test-m3 test-m4 test-m5
+test: test-python test-m1 test-m2 test-m3 test-m4 test-m5 test-m12
 
 ifneq ($(wildcard $(WAD)),)
-test: test-e1m1 test-e1m1-full test-m6 test-m7 test-m8 test-m9 test-m10 test-m11
+test: test-e1m1 test-e1m1-full test-m6 test-m7 test-m8 test-m9 test-m10 test-m11 test-m13
 endif
 
 test-python:
@@ -141,6 +141,12 @@ test-m4: $(ROM)
 
 test-m5: $(ROM)
 	sh test/run_mesen.sh $(ROM) test/m5_bsp.lua
+
+test-m12: $(ROM)
+	sh test/run_mesen.sh $(ROM) test/m12_collision.lua
+
+test-m13: $(ROM_FULL)
+	sh test/run_mesen.sh $(ROM_FULL) test/m13_door.lua
 
 test-e1m1: $(ROM_E1M1)
 	sh test/run_mesen.sh $(ROM_E1M1) test/e1m1.lua

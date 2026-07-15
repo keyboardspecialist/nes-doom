@@ -169,6 +169,12 @@ read_input:
     ror joy1
     dex
     bne @bit
+    lda joy1_prev
+    eor #$FF
+    and joy1
+    and #$02            ; B is edge-triggered Use
+    ora joy_latched
+    sta joy_latched
     lda joy1
     and #$F0
     ora joy_latched

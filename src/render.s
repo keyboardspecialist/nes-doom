@@ -21,13 +21,14 @@
 
 .import mul16u, mul16s, mul16s9, mul16s8u
 .import mul8u16u, mul8s16u, mul8s16s, mul16s16u
-.import atan2_hi, render_bsp, find_sector
+.import atan2_hi, render_bsp, find_sector, find_subsector, load_seg
 .import sin_lo, sin_hi, recipf_lo, recipf_hi
 .import recip_col_lo, recip_col_hi, light2_tbl, angcol_tbl
 .import slice_tile, slice_bank, tex_base_lo, tex_base_hi
 .import tex_max_class, tex_vperiod
 .import vhalf_ptr_lo, vhalf_ptr_hi
 .import map_verts, sec_floor, sec_ceil, sec_light
+.import ss_first_lo, ss_first_hi, ss_count
 .import ceil_clip, floor_clip
 .import PLAYER_PX, PLAYER_PY, PLAYER_ANG, EYE_REL
 .import PX_MIN_H, PX_MAX_H, PY_MIN_H, PY_MAX_H
@@ -45,8 +46,9 @@
 .import barrel_exp_dx, barrel_exp_dy, barrel_exp_tile, barrel_exp_attr
 .import monster_thing_idx, MONSTER_COUNT
 .import update_enemies
+.import init_doors, update_doors, try_use
 .endif
-.export render_frame, init_camera, do_seg
+.export render_frame, init_camera, do_seg, fetch_vertex, sub_cam, zdot, xdot
 .ifdef E1M1
 .export draw_subsector_things, init_oam_set
 .endif
@@ -55,6 +57,16 @@
 vang:    .res 256           ; per-vertex view angle (BAM hi-byte)
 vstamp:  .res 256           ; generation when this vertex was computed
 vflags:  .res 256           ; bit 7: too close for a reliable angle
+move_dx:    .res 2
+move_dy:    .res 2
+move_dx_total: .res 2
+move_dy_total: .res 2
+move_old:   .res 2
+move_x1:    .res 2
+move_y1:    .res 2
+move_cross: .res 4
+move_leaf:  .res 1
+move_pass:  .res 1
 .ifdef E1M1
 spr_scan_count:  .res 160    ; exact software enforcement of the PPU limit
 spr_floor:       .res 1
@@ -67,7 +79,13 @@ spr_current_ss:   .res 1
 spr_frame:        .res 1
 .endif
 
-NEAR    = 256               ; s11.4: 16 world units
+SPRITE_NEAR = 256           ; sprites retain the 16-unit projection cutoff
+WALL_NEAR = 64              ; walls clip at 4 units; gameplay keeps us farther
+.ifdef E1M1
+PLAYER_RADIUS = 103         ; 6.4375 units (16 Doom units scaled by 0.4)
+.else
+PLAYER_RADIUS = 256         ; 16 world units in the synthetic map
+.endif
 TURN    = 512               ; BAM per pass (~2.8 deg)
 CEIL_NT  = 4                ; blank tile -> the backdrop IS the ceiling color
 CEIL_EX  = FLAT_BANK | $80  ; palette bits irrelevant for a blank tile
@@ -95,6 +113,9 @@ init_camera:
     sta pang
     lda #>PLAYER_ANG
     sta pang+1
+.ifdef E1M1
+    jsr init_doors
+.endif
     rts
 
 render_frame:
@@ -109,7 +130,13 @@ render_frame:
     sta segs_drawn
     sta nodes_visited
     jsr consume_input
+.ifdef E1M1
+    jsr update_doors
+.endif
     jsr update_cam
+.ifdef E1M1
+    jsr try_use
+.endif
 .ifdef E1M1
     ; NMI counts shots independently of the slower renderer. One BSP pass
     ; finds the nearest visible barrel for the entire wrapped delta.
@@ -296,41 +323,459 @@ set_py_max:
     sta py
     rts
 
+.segment "FIXED"
+
 step_forward:
     jsr half_view
-    lda px
-    clc
-    adc rt_dx
-    sta px
-    lda px+1
-    adc rt_dx+1
-    sta px+1
-    lda py
-    clc
-    adc rt_dy
-    sta py
-    lda py+1
-    adc rt_dy+1
-    sta py+1
-    rts
+    jmp move_two_steps
 
 step_back:
     jsr half_view
-    lda px
     sec
+    lda #0
     sbc rt_dx
+    sta rt_dx
+    lda #0
+    sbc rt_dx+1
+    sta rt_dx+1
+    sec
+    lda #0
+    sbc rt_dy
+    sta rt_dy
+    lda #0
+    sbc rt_dy+1
+    sta rt_dy+1
+move_two_steps:
+    lda rt_dx
+    sta move_dx_total
+    lda rt_dx+1
+    sta move_dx_total+1
+    lda rt_dy
+    sta move_dy_total
+    lda rt_dy+1
+    sta move_dy_total+1
+    lda rt_dx+1
+    cmp #$80
+    ror rt_dx+1
+    ror rt_dx
+    lda rt_dy+1
+    cmp #$80
+    ror rt_dy+1
+    ror rt_dy
+    lda rt_dx
+    sta move_dx
+    lda rt_dx+1
+    sta move_dx+1
+    lda rt_dy
+    sta move_dy
+    lda rt_dy+1
+    sta move_dy+1
+    jsr try_move_axes
+    lda move_dx_total
+    sec
+    sbc move_dx
+    sta move_dx
+    lda move_dx_total+1
+    sbc move_dx+1
+    sta move_dx+1
+    lda move_dy_total
+    sec
+    sbc move_dy
+    sta move_dy
+    lda move_dy_total+1
+    sbc move_dy+1
+    sta move_dy+1
+    jsr try_move_axes
+    rts
+
+try_move_axes:
+    lda move_dx
+    ora move_dx+1
+    beq @try_y
+    jsr find_subsector
+    stx move_leaf
+    lda px
+    sta move_old
+    lda px+1
+    sta move_old+1
+    lda px
+    clc
+    adc move_dx
     sta px
     lda px+1
-    sbc rt_dx+1
+    adc move_dx+1
     sta px+1
+    jsr move_blocked
+    bcc @try_y
+    lda move_old
+    sta px
+    lda move_old+1
+    sta px+1
+@try_y:
+    lda move_dy
+    ora move_dy+1
+    beq @done
+    jsr find_subsector
+    stx move_leaf
     lda py
-    sec
-    sbc rt_dy
+    sta move_old
+    lda py+1
+    sta move_old+1
+    lda py
+    clc
+    adc move_dy
     sta py
     lda py+1
-    sbc rt_dy+1
+    adc move_dy+1
     sta py+1
+    jsr move_blocked
+    bcc @done
+    lda move_old
+    sta py
+    lda move_old+1
+    sta py+1
+@done:
     rts
+
+; Candidate px/py is blocked when its circle overlaps a blocking boundary seg
+; of the old convex subsector.  C set = blocked.
+move_blocked:
+    lda #0
+    sta move_pass
+@scan_leaf:
+.ifdef FULL_E1M1
+    lda #MAP_COMMON_BANK
+    sta MMC5_PRG_A000
+.endif
+    ldx move_leaf
+    lda ss_first_lo,x
+    sta ss_idx
+    lda ss_first_hi,x
+    sta ss_idx_hi
+    lda ss_count,x
+    sta ss_n
+@line:
+    jsr load_seg
+    ldy #6
+    lda (wall_ptr),y
+    bpl @next
+.ifdef E1M1
+    sta seg_texoff
+    and #$70
+    beq @static_blocker
+    .repeat 4
+    lsr
+    .endrepeat
+    tax
+    dex
+    lda DOOR_PASSABLE,x
+    bne @next
+@static_blocker:
+.endif
+    jsr collision_seg
+    bcs @blocked
+@next:
+    inc ss_idx
+    bne :+
+    inc ss_idx_hi
+:   dec ss_n
+    bne @line
+    lda move_pass
+    bne @clear
+    jsr find_subsector      ; candidate leaf can expose adjacent blockers
+    cpx move_leaf
+    beq @clear
+    stx move_leaf
+    inc move_pass
+    jmp @scan_leaf
+@clear:
+    clc
+    rts
+@blocked:
+    sec
+    rts
+
+collision_seg:
+    ldy #0
+    jsr fetch_vertex
+    lda wx
+    sta move_x1
+    lda wx+1
+    sta move_x1+1
+    lda wy
+    sta move_y1
+    lda wy+1
+    sta move_y1+1
+    ldy #2
+    jsr fetch_vertex
+
+    ; Reject lines whose radius-expanded segment box does not contain P.
+    lda px
+    sta mul_a
+    lda px+1
+    sta mul_a+1
+    lda move_x1
+    sta mul_b
+    lda move_x1+1
+    sta mul_b+1
+    lda wx
+    sta rt_acc
+    lda wx+1
+    sta rt_acc+1
+    jsr axis_near
+    bcs :+
+    clc
+    rts
+:
+    lda py
+    sta mul_a
+    lda py+1
+    sta mul_a+1
+    lda move_y1
+    sta mul_b
+    lda move_y1+1
+    sta mul_b+1
+    lda wy
+    sta rt_acc
+    lda wy+1
+    sta rt_acc+1
+    jsr axis_near
+    bcs :+
+    clc
+    rts
+:
+
+    ; seg delta in dx1/dy1, then cross = segdy*pointdx - segdx*pointdy.
+    lda wx
+    sec
+    sbc move_x1
+    sta dx1
+    lda wx+1
+    sbc move_x1+1
+    sta dx1+1
+    lda wy
+    sec
+    sbc move_y1
+    sta dy1
+    lda wy+1
+    sbc move_y1+1
+    sta dy1+1
+
+    lda dy1
+    sta mul_a
+    lda dy1+1
+    sta mul_a+1
+    lda px
+    sec
+    sbc move_x1
+    sta mul_b
+    lda px+1
+    sbc move_x1+1
+    sta mul_b+1
+    jsr mul16s
+    ldx #3
+@save_cross:
+    lda mul_r,x
+    sta move_cross,x
+    dex
+    bpl @save_cross
+    lda dx1
+    sta mul_a
+    lda dx1+1
+    sta mul_a+1
+    lda py
+    sec
+    sbc move_y1
+    sta mul_b
+    lda py+1
+    sbc move_y1+1
+    sta mul_b+1
+    jsr mul16s
+    lda move_cross
+    sec
+    sbc mul_r
+    sta move_cross
+    lda move_cross+1
+    sbc mul_r+1
+    sta move_cross+1
+    lda move_cross+2
+    sbc mul_r+2
+    sta move_cross+2
+    lda move_cross+3
+    sbc mul_r+3
+    sta move_cross+3
+    bmi :+
+    sec                  ; on/back of the directed boundary
+    rts
+:
+
+    ; Magnitude of the negative cross product.
+    sec
+    lda #0
+    sbc move_cross
+    sta move_cross
+    lda #0
+    sbc move_cross+1
+    sta move_cross+1
+    lda #0
+    sbc move_cross+2
+    sta move_cross+2
+    lda #0
+    sbc move_cross+3
+    sta move_cross+3
+
+    ; max + min/2 approximates Euclidean length within about 12%, avoiding
+    ; the sqrt(2) over-expansion of an L1 threshold on diagonal walls.
+    lda dx1
+    sta rt_acc
+    lda dx1+1
+    sta rt_acc+1
+    bpl :+
+    jsr neg_rt_acc
+:   lda dy1
+    sta tptr
+    lda dy1+1
+    sta tptr+1
+    bpl :+
+    jsr neg_tptr
+:   lda rt_acc+1
+    cmp tptr+1
+    bcc @swap_lengths
+    bne @length_ordered
+    lda rt_acc
+    cmp tptr
+    bcs @length_ordered
+@swap_lengths:
+    lda rt_acc
+    pha
+    lda tptr
+    sta rt_acc
+    pla
+    sta tptr
+    lda rt_acc+1
+    pha
+    lda tptr+1
+    sta rt_acc+1
+    pla
+    sta tptr+1
+@length_ordered:
+    lsr tptr+1
+    ror tptr
+    lda rt_acc
+    clc
+    adc tptr
+    sta mul_a
+    lda rt_acc+1
+    adc tptr+1
+    sta mul_a+1
+    lda #<PLAYER_RADIUS
+    sta mul_b
+    lda #>PLAYER_RADIUS
+    sta mul_b+1
+    jsr mul16u
+    ldx #3
+@cmp_threshold:
+    lda move_cross,x
+    cmp mul_r,x
+    bcc @hit
+    bne @clear
+    dex
+    bpl @cmp_threshold
+@clear:
+    clc
+    rts
+@hit:
+    sec
+    rts
+
+; Candidate mul_a, endpoints mul_b/rt_acc. C set when inside expanded range.
+axis_near:
+    lda mul_b+1
+    cmp rt_acc+1
+    bcc @ordered
+    bne @swap
+    lda mul_b
+    cmp rt_acc
+    bcc @ordered
+@swap:
+    lda mul_b
+    pha
+    lda rt_acc
+    sta mul_b
+    pla
+    sta rt_acc
+    lda mul_b+1
+    pha
+    lda rt_acc+1
+    sta mul_b+1
+    pla
+    sta rt_acc+1
+@ordered:
+    lda mul_b
+    sec
+    sbc #<PLAYER_RADIUS
+    sta tptr
+    lda mul_b+1
+    sbc #>PLAYER_RADIUS
+    sta tptr+1
+    bcs :+
+    lda #0
+    sta tptr
+    sta tptr+1
+:   lda mul_a+1
+    cmp tptr+1
+    bcc @outside
+    bne :+
+    lda mul_a
+    cmp tptr
+    bcc @outside
+:   lda rt_acc
+    clc
+    adc #<PLAYER_RADIUS
+    sta tptr
+    lda rt_acc+1
+    adc #>PLAYER_RADIUS
+    sta tptr+1
+    bcc :+
+    lda #$FF
+    sta tptr
+    sta tptr+1
+:   lda mul_a+1
+    cmp tptr+1
+    bcc @inside
+    bne @outside
+    lda mul_a
+    cmp tptr
+    bcc @inside
+    beq @inside
+@outside:
+    clc
+    rts
+@inside:
+    sec
+    rts
+
+neg_rt_acc:
+    sec
+    lda #0
+    sbc rt_acc
+    sta rt_acc
+    lda #0
+    sbc rt_acc+1
+    sta rt_acc+1
+    rts
+
+neg_tptr:
+    sec
+    lda #0
+    sbc tptr
+    sta tptr
+    lda #0
+    sbc tptr+1
+    sta tptr+1
+    rts
+
+.segment "CODE"
 
 half_view:                  ; rt_dx/rt_dy = (vcos, vsin) >> 1 signed
     lda vcos
@@ -483,27 +928,37 @@ rzh_lookup:
 :
     rts
 
-; near-clip fraction: A = clamp255((NEAR - tz_behind) * recipf[dz>>4] >> 15)
+; Exact rare-path fraction: A = min(255, ((near-zBehind) << 8) / dz).
+; The reciprocal projection table intentionally clamps z<16 and cannot be
+; reused here now that wall geometry clips at four units.
 clip_frac:
-    lda rt_acc
-    sta ttz
-    lda rt_acc+1
-    sta ttz+1
-    jsr rzh_lookup
-    sta mul_b
-    stx mul_b+1
-    jsr mul16u
-    lda mul_r+3
-    bne @max
-    lda mul_r+2
-    bmi @max
-    lda mul_r+1
-    asl
-    lda mul_r+2
-    rol
-    rts
-@max:
-    lda #255
+    lda #0
+    sta tclip
+    ldx #8
+@bit:
+    asl mul_a
+    rol mul_a+1
+    asl tclip
+    lda mul_a+1
+    cmp rt_acc+1
+    bcc @next
+    bne @subtract
+    lda mul_a
+    cmp rt_acc
+    bcc @next
+@subtract:
+    lda mul_a
+    sec
+    sbc rt_acc
+    sta mul_a
+    lda mul_a+1
+    sbc rt_acc+1
+    sta mul_a+1
+    inc tclip
+@next:
+    dex
+    bne @bit
+    lda tclip
     rts
 
 shift3_cx:              ; hi16(mul_r) >> 3 signed -> A=lo X=hi
@@ -929,13 +1384,13 @@ project_world_thing:
     bpl :+
     rts
 :
-    cmp #>NEAR
+    cmp #>SPRITE_NEAR
     bcs :+
     rts
 :
     bne @depth_ok
     lda ttz
-    cmp #<NEAR
+    cmp #<SPRITE_NEAR
     bcs @depth_ok
     rts
 @depth_ok:
@@ -1723,6 +2178,7 @@ fetch_vertex:
 ; (0 = mid/upper -> sl_tp/sl_bp, 4 = lower -> sl_tp_l/sl_bp_l).
 ; (The palette ramp bit rides bit 7 of each slice_bank LUT byte.)
 set_texptrs:
+    and #$0F            ; high bit marks collision-blocking segs
     cpx #0
     bne @lower_slot
     sta sl_tex
@@ -1877,7 +2333,7 @@ seg_deltas:
 
 ; ---------------------------------------------------------------------------
 ; do_seg: rasterize one seg from (wall_ptr). Record layout (10 bytes):
-; v1 v2 (vertex indices), ulen (texels), u0, tex, tex_low, front, back
+; v1/v2 + V phases, ulen, u0, tex|blocking, tex_low, front, back
 ;
 ; Angle gate (Doom's R_AddLine): cached per-vertex angles decide backface /
 ; off-frustum / fully-occluded before any transform math. Only segs that
@@ -2103,15 +2559,15 @@ do_seg:
     ; both endpoints behind the near plane -> out
     lda tz1
     sec
-    sbc #<NEAR
+    sbc #<WALL_NEAR
     lda tz1+1
-    sbc #>NEAR
+    sbc #>WALL_NEAR
     bpl @infront
     lda tz2
     sec
-    sbc #<NEAR
+    sbc #<WALL_NEAR
     lda tz2+1
-    sbc #>NEAR
+    sbc #>WALL_NEAR
     bpl @infront
     rts
 @infront:
@@ -2153,33 +2609,33 @@ do_seg:
     ; --- near clip (same structure as M4) ---
     lda tz1
     sec
-    sbc #<NEAR
+    sbc #<WALL_NEAR
     sta rt_acc
     lda tz1+1
-    sbc #>NEAR
+    sbc #>WALL_NEAR
     sta rt_acc+1
     bmi @behind1
     lda tz2
     sec
-    sbc #<NEAR
+    sbc #<WALL_NEAR
     lda tz2+1
-    sbc #>NEAR
+    sbc #>WALL_NEAR
     bmi @clip2
     jmp @project
 @behind1:
     lda tz2
     sec
-    sbc #<NEAR
+    sbc #<WALL_NEAR
     lda tz2+1
-    sbc #>NEAR
+    sbc #>WALL_NEAR
     bpl @clip1
     rts
 @clip1:
-    lda #<NEAR
+    lda #<WALL_NEAR
     sec
     sbc tz1
     sta mul_a
-    lda #>NEAR
+    lda #>WALL_NEAR
     sbc tz1+1
     sta mul_a+1
     lda tz2
@@ -2210,9 +2666,9 @@ do_seg:
     lda tx1+1
     adc mul_r+2
     sta tx1+1
-    lda #<NEAR
+    lda #<WALL_NEAR
     sta tz1
-    lda #>NEAR
+    lda #>WALL_NEAR
     sta tz1+1
     lda ulen
     sta mul_a
@@ -2228,11 +2684,11 @@ do_seg:
     sta uacc+1
     jmp @project
 @clip2:
-    lda #<NEAR
+    lda #<WALL_NEAR
     sec
     sbc tz2
     sta mul_a
-    lda #>NEAR
+    lda #>WALL_NEAR
     sbc tz2+1
     sta mul_a+1
     lda tz1
@@ -2263,9 +2719,9 @@ do_seg:
     lda tx2+1
     adc mul_r+2
     sta tx2+1
-    lda #<NEAR
+    lda #<WALL_NEAR
     sta tz2
-    lda #>NEAR
+    lda #>WALL_NEAR
     sta tz2+1
     lda ulen
     sta mul_a
@@ -2625,7 +3081,11 @@ do_seg:
     ldy #8
     lda (wall_ptr),y    ; front sector: heights relative to eye (signed)
     tax
+.ifdef E1M1
+    lda SECTOR_CEIL_RT,x
+.else
     lda sec_ceil,x
+.endif
     sec
     sbc eye_h
     sta seg_hc
@@ -2645,7 +3105,11 @@ do_seg:
     cmp #$FF
     beq :+
     tay
+.ifdef E1M1
+    lda SECTOR_CEIL_RT,y
+.else
     lda sec_ceil,y
+.endif
     sec
     sbc eye_h
     sta seg_bhc

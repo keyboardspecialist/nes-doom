@@ -6,6 +6,8 @@
 .export thing_x_lo, thing_x_hi, thing_y_lo, thing_y_hi, thing_kind
 .export monster_thing_idx, monster_spawn_ss
 .export sec_floor, sec_ceil, sec_light
+.export door_sector, door_closed, door_open
+.export door_use_x_lo, door_use_x_hi, door_use_y_lo, door_use_y_hi, door_use_id
 .export MAP_ROOT_NODE : absolute
 MAP_ROOT_NODE = 0
 .export PLAYER_PX : absolute
@@ -20,16 +22,22 @@ EYE_REL = 41
 MAP_THING_COUNT = 0
 .export MONSTER_COUNT : absolute
 MONSTER_COUNT = 0
+.export MAP_SECTOR_COUNT : absolute
+MAP_SECTOR_COUNT = 3
+.export DOOR_COUNT : absolute
+DOOR_COUNT = 0
+.export DOOR_USE_COUNT : absolute
+DOOR_USE_COUNT = 0
 .export REJECT_ROWB : absolute
 REJECT_ROWB = 1
 .export PX_MIN_H : absolute
-PX_MIN_H = 6
+PX_MIN_H = 4
 .export PX_MAX_H : absolute
-PX_MAX_H = 46
+PX_MAX_H = 47
 .export PY_MIN_H : absolute
-PY_MIN_H = 6
+PY_MIN_H = 4
 .export PY_MAX_H : absolute
-PY_MAX_H = 18
+PY_MAX_H = 19
 .export reject_tbl
 .segment "LUT01"
 map_verts:
@@ -40,22 +48,22 @@ map_verts:
     .byte $00, $0E, $00, $04, $00, $0E, $00, $0A, $00, $12, $00, $0A, $00, $12, $00, $04
     .byte $00, $1C, $00, $04
 map_segs:
-    .byte $00, $00, $01, $00, $60, $00, $00, $00, $02, $FF, $02, $00, $03, $00, $60, $00
-    .byte $00, $00, $02, $FF, $03, $00, $00, $00, $40, $00, $00, $00, $02, $01, $01, $00
-    .byte $04, $00, $C0, $00, $00, $00, $02, $FF, $04, $00, $05, $00, $80, $00, $00, $00
-    .byte $02, $FF, $05, $00, $06, $00, $80, $00, $00, $00, $02, $FF, $06, $00, $02, $00
-    .byte $C0, $00, $00, $00, $02, $FF, $07, $00, $00, $00, $80, $00, $01, $01, $01, $FF
-    .byte $03, $00, $08, $00, $80, $00, $01, $01, $01, $FF, $08, $00, $07, $00, $40, $00
+    .byte $00, $00, $01, $00, $60, $00, $80, $00, $02, $FF, $02, $00, $03, $00, $60, $00
+    .byte $80, $00, $02, $FF, $03, $00, $00, $00, $40, $00, $00, $00, $02, $01, $01, $00
+    .byte $04, $00, $C0, $00, $80, $00, $02, $FF, $04, $00, $05, $00, $80, $00, $80, $00
+    .byte $02, $FF, $05, $00, $06, $00, $80, $00, $80, $00, $02, $FF, $06, $00, $02, $00
+    .byte $C0, $00, $80, $00, $02, $FF, $07, $00, $00, $00, $80, $00, $81, $01, $01, $FF
+    .byte $03, $00, $08, $00, $80, $00, $81, $01, $01, $FF, $08, $00, $07, $00, $40, $00
     .byte $01, $01, $01, $00, $00, $00, $03, $00, $40, $00, $01, $01, $01, $02, $09, $00
-    .byte $0A, $00, $60, $00, $00, $00, $00, $FF, $0A, $00, $0B, $00, $C0, $00, $00, $00
-    .byte $00, $FF, $0B, $00, $0C, $00, $C0, $00, $00, $00, $00, $FF, $0C, $00, $07, $00
-    .byte $60, $00, $00, $00, $00, $FF, $0D, $00, $0E, $00, $40, $00, $01, $01, $00, $FF
-    .byte $0F, $00, $09, $00, $A0, $00, $00, $00, $00, $FF, $10, $00, $0F, $00, $A0, $00
-    .byte $00, $00, $00, $FF, $0E, $00, $11, $00, $40, $00, $01, $01, $00, $FF, $11, $00
-    .byte $12, $00, $40, $00, $01, $01, $00, $FF, $13, $00, $10, $00, $40, $00, $00, $00
-    .byte $00, $FF, $12, $00, $0D, $00, $40, $00, $01, $01, $00, $FF, $08, $00, $14, $00
-    .byte $60, $00, $00, $00, $00, $FF, $07, $00, $08, $00, $40, $00, $00, $00, $00, $01
-    .byte $14, $00, $13, $00, $A0, $00, $00, $00, $00, $FF
+    .byte $0A, $00, $60, $00, $80, $00, $00, $FF, $0A, $00, $0B, $00, $C0, $00, $80, $00
+    .byte $00, $FF, $0B, $00, $0C, $00, $C0, $00, $80, $00, $00, $FF, $0C, $00, $07, $00
+    .byte $60, $00, $80, $00, $00, $FF, $0D, $00, $0E, $00, $40, $00, $81, $01, $00, $FF
+    .byte $0F, $00, $09, $00, $A0, $00, $80, $00, $00, $FF, $10, $00, $0F, $00, $A0, $00
+    .byte $80, $00, $00, $FF, $0E, $00, $11, $00, $40, $00, $81, $01, $00, $FF, $11, $00
+    .byte $12, $00, $40, $00, $81, $01, $00, $FF, $13, $00, $10, $00, $40, $00, $80, $00
+    .byte $00, $FF, $12, $00, $0D, $00, $40, $00, $81, $01, $00, $FF, $08, $00, $14, $00
+    .byte $60, $00, $80, $00, $00, $FF, $07, $00, $08, $00, $40, $00, $00, $00, $00, $01
+    .byte $14, $00, $13, $00, $A0, $00, $80, $00, $00, $FF
 map_nodes:
     .byte $00, $1C, $00, $04, $00, $00, $00, $10, $01, $00, $02, $00, $00, $00, $32, $19
     .byte $00, $24, $00, $04, $00, $00, $00, $10, $00, $01, $01, $01, $00, $00, $32, $19
@@ -102,5 +110,21 @@ sec_ceil:
     .byte $80, $60, $80
 sec_light:
     .byte $00, $02, $01
+door_sector:
+    ; empty
+door_closed:
+    ; empty
+door_open:
+    ; empty
+door_use_x_lo:
+    ; empty
+door_use_x_hi:
+    ; empty
+door_use_y_lo:
+    ; empty
+door_use_y_hi:
+    ; empty
+door_use_id:
+    ; empty
 reject_tbl:
     .byte $00, $00, $00

@@ -36,7 +36,7 @@ class MapThingTest(unittest.TestCase):
     @unittest.skipUnless(os.path.exists("Doom1.WAD"), "Doom1.WAD not available")
     def test_e1m1_pickups_are_filtered_transformed_and_grouped(self):
         args, _texinfo = convert_wad("Doom1.WAD", "E1M1")
-        groups = args[-1]
+        groups = args[9]
         self.assertEqual(len(groups), len(args[3]))
         self.assertEqual(sum(map(len, groups)), 16)
         self.assertEqual([sum(thing[2] == kind for group in groups for thing in group)
@@ -63,7 +63,7 @@ class MapThingTest(unittest.TestCase):
         args, _texinfo = convert_wad("Doom1.WAD", "E1M1", full=True)
         self.assertEqual([len(args[i]) for i in range(5)],
                          [533, 816, 236, 237, 85])
-        groups = args[-1]
+        groups = args[9]
         self.assertEqual(sum(map(len, groups)), 48)
         self.assertEqual([sum(thing[2] == kind for group in groups for thing in group)
                           for kind in range(5)], [12, 25, 1, 6, 4])
