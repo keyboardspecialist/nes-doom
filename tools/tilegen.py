@@ -1108,6 +1108,12 @@ def write_luts(path, slice_tile, slice_bank, ntex, max_cls, vperiod,
 
 HUD_ROWS = 5              # status bar: tile rows 20-24 = 40 px, 32 cols
 HUD_BANK_PAL = None       # set by build_hud
+HUD_FACE_BANK = 63        # window 1 -> physical CHR bank 127
+HUD_FACE_COL = 14
+HUD_FACE_ROW = 1
+HUD_FACE_NAMES = tuple(f"STFST{pain}1" for pain in range(5)) + \
+    tuple(f"STFKILL{pain}" for pain in range(5)) + \
+    ("STFST00", "STFST02", "STFDEAD0")
 
 
 # Dedicated HUD palette set, loaded by the line-160 IRQ (the status bar has
@@ -1122,7 +1128,7 @@ HUD_PALETTES = [
 
 
 def build_hud(wadpath, bg_palettes, hud_bank):
-    """Compose the status-bar base and reusable tile-aligned 8x16 glyphs."""
+    """Compose the status bar, numeric glyphs, and fixed 4x4 face frames."""
     try:
         import wadlib
     except ModuleNotFoundError:
@@ -1133,7 +1139,6 @@ def build_hud(wadpath, bg_palettes, hud_bank):
     img = [[-1] * H for _ in range(W)]      # img[x][y], -1 = empty
     wadlib._draw_picture(wad, "STBAR", img, W, H, 0, 8)
     wadlib._draw_picture(wad, "STARMS", img, W, H, 104, 8)
-    wadlib._draw_picture(wad, "STFST01", img, W, H, 143, 9)
 
     # RGB canvas (empty -> near-black), box-filter 320x40 -> 256x40
     rgb = [[pal[img[x][y]] if img[x][y] >= 0 else (12, 12, 12)
@@ -1151,32 +1156,33 @@ def build_hud(wadpath, bg_palettes, hud_bank):
             tiles.append(encoded)
         return tmap[encoded]
 
+    def quantize(cell, palette_index):
+        cols = pals[palette_index]
+        idx = []
+        for y, row in enumerate(cell):
+            irow = []
+            for x, px in enumerate(row):
+                d = sorted((_wdist(px, color), i)
+                           for i, color in enumerate(cols))
+                (d1, c1), (d2, c2) = d[0], d[1]
+                if d1 + d2 > 0 and d1 / (d1 + d2) > 0.38 and (x ^ y) & 1:
+                    c1 = c2
+                irow.append(c1)
+            idx.append(irow)
+        return idx
+
     hud_nt, hud_ex = [], []
     for row in range(HUD_ROWS):
         for col in range(32):
             cell = [[rgb[row * 8 + y][col * 8 + x] for x in range(8)]
                     for y in range(8)]
             best = None
-            # face region (320-space x 143-167 -> cols 14-16): flesh/gray
-            # only, or hair fringes grab the olive accent and read green
-            cand = (0, 2) if 14 <= col <= 16 else (0, 1, 2, 3)
+            cand = (0, 1, 2, 3)
             for pi in cand:
+                idx = quantize(cell, pi)
                 cols = pals[pi]
-                err = 0.0
-                idx = []
-                for y, r in enumerate(cell):
-                    irow = []
-                    for x, px in enumerate(r):
-                        d = sorted((_wdist(px, c), i)
-                                   for i, c in enumerate(cols))
-                        (d1, c1), (d2, c2) = d[0], d[1]
-                        if d1 + d2 > 0 and d1 / (d1 + d2) > 0.38 \
-                                and (x ^ y) & 1:
-                            c1 = c2
-                            d1 = d2
-                        err += d1
-                        irow.append(c1)
-                    idx.append(irow)
+                err = sum(_wdist(cell[y][x], cols[idx[y][x]])
+                          for y in range(8) for x in range(8))
                 if best is None or err < best[0]:
                     best = (err, pi, idx)
             _, pi, idx = best
@@ -1202,9 +1208,9 @@ def build_hud(wadpath, bg_palettes, hud_bank):
         glyph_bottom.append(tile_id(encode_tile(pixels[8:])))
 
     fields = (
-        (2, (10, 5, 0)),
+        (1, (10, 5, 0)),
         (6, (1, 0, 0, 11)),
-        (20, (10, 10, 0, 11)),
+        (19, (10, 10, 0, 11)),
     )
     for col, glyphs in fields:
         for offset, glyph in enumerate(glyphs):
@@ -1212,8 +1218,33 @@ def build_hud(wadpath, bg_palettes, hud_bank):
                 cell = row * 32 + col + offset
                 hud_nt[cell] = table[glyph]
                 hud_ex[cell] = hud_bank | (1 << 6)
+
+    # Every face frame includes the underlying status-bar pixels and occupies
+    # the same 4x4 tile rectangle. Applying Doom's picture offsets keeps the
+    # head centered while a single fixed palette eliminates fringe recoloring.
+    face_tiles = []
+    for name in HUD_FACE_NAMES:
+        face_img = [[-1] * H for _ in range(W)]
+        wadlib._draw_picture(wad, "STBAR", face_img, W, H, 0, 8)
+        wadlib._draw_picture(wad, "STARMS", face_img, W, H, 104, 8)
+        _fw, _fh, left, top, _pixels = wadlib.decode_picture(wad, name)
+        wadlib._draw_picture(wad, name, face_img, W, H, 143 - left, 8 - top)
+        face_rgb = [[pal[face_img[x][y]] if face_img[x][y] >= 0 else (12, 12, 12)
+                     for x in range(W)] for y in range(H)]
+        face_rgb = box_resample(face_rgb, 256, H)
+        for row in range(HUD_FACE_ROW, HUD_FACE_ROW + 4):
+            for col in range(HUD_FACE_COL, HUD_FACE_COL + 4):
+                cell = [[face_rgb[row * 8 + y][col * 8 + x] for x in range(8)]
+                        for y in range(8)]
+                face_tiles.append(encode_tile(quantize(cell, 2)))
+    assert len(face_tiles) <= 256
+    for row in range(4):
+        for col in range(4):
+            cell = (HUD_FACE_ROW + row) * 32 + HUD_FACE_COL + col
+            hud_nt[cell] = row * 4 + col       # initial STFST01 frame
+            hud_ex[cell] = HUD_FACE_BANK | (2 << 6)
     assert len(tiles) <= 256, f"HUD needs {len(tiles)} tiles"
-    return tiles, hud_nt, hud_ex, glyph_top, glyph_bottom
+    return tiles, hud_nt, hud_ex, glyph_top, glyph_bottom, face_tiles
 
 
 def build_title(wadpath):
@@ -1428,7 +1459,7 @@ def main():
     sprite_meta = None
     title = None
     if args.wad:
-        tiles, hud_nt, hud_ex, glyph_top, glyph_bottom = build_hud(
+        tiles, hud_nt, hud_ex, glyph_top, glyph_bottom, face_tiles = build_hud(
             args.wad, bg_palettes, flat_bank + 1)
         bank = bytearray()
         for t in tiles:
@@ -1457,6 +1488,11 @@ def main():
         # to physical 4KB bank 125. Keep the window-0 copy for diagnostics.
         data = data.ljust(125 * BANK_BYTES, b"\0") + hud_bank_data
         assert len(data) == 126 * BANK_BYTES
+        face_bank = b"".join(face_tiles).ljust(BANK_BYTES, b"\0")
+        data = data.ljust(127 * BANK_BYTES, b"\0") + face_bank
+        assert len(data) == 128 * BANK_BYTES
+        print(f"faces: {len(HUD_FACE_NAMES)} frames, {len(face_tiles)} tiles "
+              "in physical bank 127")
         title_chr, title_nt, title_ex, title_palettes, title_tiles, source_size = \
             build_title(args.wad)
         data = data.ljust(TITLE_CHR_BASE_BANK * BANK_BYTES, b"\0") + title_chr

@@ -16,6 +16,7 @@
 .import sec_pal, hud_glyph_top, hud_glyph_bottom
 .import weapon_chr_page_lo, weapon_chr_page_hi
 .import audio_tick
+.import update_face, upload_face
 .endif
 .export nmi_handler
 
@@ -55,6 +56,7 @@ nmi_handler:
     adc WEAPON_FRAME
     sta $4014
     jsr read_input
+    jsr update_face
 .endif
 
 .ifndef M2DEMO
@@ -65,9 +67,16 @@ nmi_handler:
     bne @skippush
 .ifdef E1M1
     lda HUD_DIRTY
-    beq @normal_quota
+    beq @face_check
     jsr upload_hud
     lda #0              ; six HUD runs consume the full column-push budget
+    jmp @set_quota
+@face_check:
+    lda FACE_WANT
+    cmp FACE_SHOWN
+    beq @normal_quota
+    jsr upload_face
+    lda #0              ; face upload consumes this frame's push headroom
     jmp @set_quota
 @normal_quota:
     lda #NMI_QUOTA
@@ -322,9 +331,9 @@ upload_hud:
     jsr hud_convert
     lda #3
     sta nmi_hud_value
-    ldx #$A2
+    ldx #$A1
     jsr hud_line_top
-    ldx #$C2
+    ldx #$C1
     jsr hud_line_bottom
     lda PL_HEALTH
     jsr hud_convert
@@ -338,9 +347,9 @@ upload_hud:
     jsr hud_convert
     lda #4
     sta nmi_hud_value
-    ldx #$B4
+    ldx #$B3
     jsr hud_line_top
-    ldx #$D4
+    ldx #$D3
     jsr hud_line_bottom
     lda #0
     sta HUD_DIRTY

@@ -444,21 +444,17 @@ code.
 
 ## Status bar (sixth session)
 
-The HUD fits with room to spare: 12 textures x 5 banks + flats = bank 60,
-leaving banks 61-63 of the 64-bank ExAttr frame window free (768 tiles).
-tilegen `build_hud` composites STBAR + STARMS + STFST01 + baked
-placeholder digits (STTNUM/STTPRCNT: 50 ammo, 100% health, 0% armor) at
-320x40, box-filters to 256x40, then quantizes each 8x8 cell against ALL
-four BG palettes (per-tile ExAttr palette choice; the HUD also uses
-color 0 — the backdrop — since the bar is opaque, giving 4 colors per
-tile where walls get 3). Deduped: 123 unique tiles in bank 61 (the full
-bar is 160 cells). Init copies the generated hud_nt/hud_ex tables into
-the nametable rows 20-24 and ExRAM; the line-160 split renders it with
-zero runtime cost. Red Doom digits land on the warm ramp (orange-brown) —
-no spare palette above line 160, since palette rewrites need blanking and
-the letterbox blank sits below the bar. Live digit updates need game
-state that does not exist yet; when it does, a digit write is a handful
-of $2007 writes in the NMI/IRQ push windows.
+The HUD uses a 125-tile deduplicated STBAR/STARMS and numeric-glyph bank at
+physical bank 125. Ammo and armor are right-aligned one tile farther left
+than the original pass; health remains centered. Physical bank 127 holds
+thirteen fixed 4x4 face frames: five health tiers, five damage reactions,
+two healthy idle alternates, and death. Every face cell uses HUD-window bank
+63 and the flesh palette, so animation is four short nametable runs with no
+CHR or ExRAM upload and no palette fringe changes. NMI updates the face from
+health and committed damage events, keeps pain for 60 video frames, cycles
+healthy idle every 30, and gives death unconditional priority. Numeric and
+face uploads serialize and sacrifice that NMI's viewport-column quota to
+stay inside measured vblank timing.
 
 ## Palette game: 8 palettes per frame + per-sector sets (seventh session)
 
@@ -470,8 +466,8 @@ carry palette work:
 
 - **Line-160 IRQ**: blank ~2 lines, stream 16 bytes -> the status bar gets
   its OWN 4 palettes (gray panel, STTNUM red digits, flesh face, gold
-  accents — build_hud quantizes against HUD_PALETTES now, with the face
-  columns restricted to gray/flesh so hair fringes don't grab olive). The
+  accents — all 16 animated face cells are fixed to the flesh palette so
+  hair and background fringes cannot grab gray or olive). The
   sweep smear is confined to a thin divider line the HUD art keeps black.
   Hardware gotcha: the mid-frame blank CLEARS MMC5 in-frame detection and
   the scanline counter restarts from zero at unblank, so phase 1 arms a

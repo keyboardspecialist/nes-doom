@@ -9,9 +9,9 @@ local shotSounds = 0
 local ppuAddrHi, ppuAddr, ppuInc = nil, nil, 1
 local activeRun = nil
 local targets = {
-  [0x22A2] = 3, [0x22C2] = 3,
+  [0x22A1] = 3, [0x22C1] = 3,
   [0x22A6] = 4, [0x22C6] = 4,
-  [0x22B4] = 4, [0x22D4] = 4,
+  [0x22B3] = 4, [0x22D3] = 4,
 }
 
 local function fail(msg)
@@ -108,8 +108,8 @@ emu.addEventCallback(function()
     if weaponFrame ~= 0 or emu.read(0x6A2A, MT) ~= 0 then
       return fail("weapon did not return to idle")
     end
-    if not same(hudRuns[0x22A2], {0x00, 0x76, 0x80}) or
-       not same(hudRuns[0x22C2], {0x00, 0x77, 0x81}) then
+    if not same(hudRuns[0x22A1], {0x00, 0x6F, 0x79}) or
+       not same(hudRuns[0x22C1], {0x00, 0x70, 0x7A}) then
       return fail("ammo HUD did not display right-aligned 49")
     end
     teleport(0x1ACD, 0x2A66) -- thing 3, BON1

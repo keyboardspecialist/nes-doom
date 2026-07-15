@@ -7,6 +7,10 @@ from pathlib import Path
 from tools.tilegen import (
     BARREL_EXPLOSION_FRAMES,
     BARREL_EXP_CLASS_HEIGHTS,
+    HUD_FACE_BANK,
+    HUD_FACE_COL,
+    HUD_FACE_NAMES,
+    HUD_FACE_ROW,
     WEAPON_FRAMES,
     WEAPON_PATTERN_BASE,
     WORLD_PATTERN_CAP,
@@ -247,8 +251,8 @@ class SpriteTest(unittest.TestCase):
         self.assertEqual(colors, {1, 2, 3})
 
     def test_dynamic_hud_glyphs_and_initial_layout(self):
-        tiles, hud_nt, hud_ex, glyph_top, glyph_bottom = self.hud
-        self.assertEqual(len(tiles), 132)
+        tiles, hud_nt, hud_ex, glyph_top, glyph_bottom, face_tiles = self.hud
+        self.assertEqual(len(tiles), 125)
         self.assertLessEqual(len(tiles), 256)
         self.assertEqual((len(hud_nt), len(hud_ex)), (160, 160))
         self.assertEqual((len(glyph_top), len(glyph_bottom)), (12, 12))
@@ -263,9 +267,9 @@ class SpriteTest(unittest.TestCase):
             self.assertTrue(any(tiles[glyph_bottom[glyph]]))
 
         fields = (
-            (2, (10, 5, 0)),
+            (1, (10, 5, 0)),
             (6, (1, 0, 0, 11)),
-            (20, (10, 10, 0, 11)),
+            (19, (10, 10, 0, 11)),
         )
         field_cells = set()
         for col, glyphs in fields:
@@ -281,6 +285,17 @@ class SpriteTest(unittest.TestCase):
         self.assertTrue(all(index in field_cells
                             for index, tile in enumerate(hud_nt)
                             if tile in nonblank_tiles))
+
+        self.assertEqual(len(face_tiles), len(HUD_FACE_NAMES) * 16)
+        self.assertTrue(all(len(tile) == 16 for tile in face_tiles))
+        self.assertEqual(HUD_FACE_NAMES[0], "STFST01")
+        self.assertEqual(HUD_FACE_NAMES[5], "STFKILL0")
+        self.assertEqual(HUD_FACE_NAMES[-1], "STFDEAD0")
+        for row in range(4):
+            for col in range(4):
+                cell = (HUD_FACE_ROW + row) * 32 + HUD_FACE_COL + col
+                self.assertEqual(hud_nt[cell], row * 4 + col)
+                self.assertEqual(hud_ex[cell], HUD_FACE_BANK | (2 << 6))
 
     def test_titlepic_chr_and_extended_attributes(self):
         chr_data, nametable, exattr, palettes, tile_count, source_size = self.title
@@ -298,7 +313,7 @@ class SpriteTest(unittest.TestCase):
         self.assertEqual(palettes[0::4], [0x0F] * 4)
 
     def test_generated_lut_contract_and_segments(self):
-        hud = self.hud[1:]
+        hud = self.hud[1:5]
         title = self.title[1:4]
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "luts.s"

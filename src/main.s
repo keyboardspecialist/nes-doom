@@ -146,6 +146,12 @@ reset:
     sta PL_ARMOR
     sta PL_ARMOR_TYPE
     sta HUD_DIRTY       ; generated HUD already shows 50 / 100% / 0%
+    sta FACE_WANT       ; frame 0 = healthy STFST01
+    sta FACE_SHOWN
+    sta FACE_TIMER
+    sta FACE_HIT_SEEN
+    sta FACE_IDLE_TIMER
+    sta FACE_IDLE_PHASE
     sta WEAPON_FRAME
     sta WEAPON_TIMER
     sta SHOT_COUNT

@@ -17,6 +17,12 @@ PL_HEALTH = $6A05
 PL_ARMOR = $6A06
 PL_ARMOR_TYPE = $6A07
 THING_ACTIVE = $6A08  ; 8-byte active bitset, through $6A0F
+FACE_WANT = $6A10
+FACE_SHOWN = $6A11
+FACE_TIMER = $6A12
+FACE_HIT_SEEN = $6A13
+FACE_IDLE_TIMER = $6A14
+FACE_IDLE_PHASE = $6A15
 HUD_DIRTY = $6A28
 WEAPON_FRAME = $6A29
 WEAPON_TIMER = $6A2A
@@ -80,6 +86,7 @@ MAP_SEG0_BANK = $84
 MAP_SEG1_BANK = $85
 MAP_GEOM_BANK = $86
 DOOR_CODE_BANK = $8D
+HUD_CODE_BANK = $89
 
 ; Screen split: view rows 0-19 (lines 0-159), status bar rows 20-24 (lines
 ; 160-199), letterbox lines 200-240. A column costs ~410 cycles including
@@ -117,6 +124,7 @@ SPRITE_CHR_PAGE = 256 ; first of eight 1KB 8x16 sprite pages
 WORLD_SPRITE_PAGE_COUNT = 6
 WEAPON_SPRITE_PAGE_FIRST = 6
 HUD_CHR_WINDOW = 1  ; line-160 split: low ExAttr bank 61 -> physical bank 125
+HUD_FACE_BANK = 63  ; window 1 -> physical bank 127
 TITLE_CHR_WINDOW = 2 ; title banks 128-130, selected before gameplay starts
 TITLE_PRG_BANK = $87
 MUSIC_PRG_BANK = $88

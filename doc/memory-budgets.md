@@ -7,13 +7,13 @@ work.
 ## Summary
 
 - PRG-ROM capacity: 128 KiB in sixteen 8 KiB banks.
-- Full E1M1 PRG use: 71,276 bytes, leaving 59,796 bytes overall.
+- Full E1M1 PRG use: 71,583 bytes, leaving 59,489 bytes overall.
 - CHR-ROM capacity: 1 MiB.
 - Generated CHR prefix: 536,576 bytes; the remaining 512,000 bytes are
   linker-filled zeros.
 - Advertised volatile PRG-RAM: 32 KiB.
 - Runtime WRAM use: bank 0 only, through the 8 KiB `$6000-$7FFF` window.
-- Bank-0 WRAM reserved: approximately 6,184 bytes, leaving 2,008 bytes.
+- Bank-0 WRAM reserved: approximately 6,190 bytes, leaving 2,002 bytes.
 - Extended MMC5 WRAM is not currently banked or used.
 
 ## PRG-ROM
@@ -31,21 +31,22 @@ The cartridge contains sixteen 8 KiB PRG-ROM banks.
 | 06 | Vertices and nodes | 5,908 | 2,284 |
 | 07 | Title code and data | 1,936 | 6,256 |
 | 08 | Music | 8,016 | 176 |
-| 09-0C | Unused | 0 | 32,768 total |
+| 09 | HUD face upload code | 75 | 8,117 |
+| 0A-0C | Unused | 0 | 24,576 total |
 | 0D | Door code | 732 | 7,460 |
-| 0E | Main code | 7,899 | 293 |
-| 0F | Fixed code, DPCM, and vectors | 6,687 | 1,505 fragmented |
+| 0E | Main code | 8,074 | 118 |
+| 0F | Fixed code, DPCM, and vectors | 6,744 | 1,448 fragmented |
 
-Full E1M1 uses 71,276 bytes and leaves 59,796 bytes overall. The trimmed
-build uses approximately 55.8 KiB and leaves approximately 75.3 KiB.
+Full E1M1 uses 71,583 bytes and leaves 59,489 bytes overall. The trimmed
+build uses approximately 56.1 KiB and leaves approximately 75.0 KiB.
 
 ### Placement Pressure
 
-- Banks 09-0C provide four completely unused 8 KiB ROM banks.
+- Banks 0A-0C provide three completely unused 8 KiB ROM banks.
 - Bank 04 has only eight bytes free and cannot hold additional full-map segs
   without changing the seg split.
-- Main `CODE` in bank 0E has 293 bytes free.
-- The contiguous fixed-code region before DPCM has 168 bytes free in the full
+- Main `CODE` in bank 0E has 118 bytes free.
+- The contiguous fixed-code region before DPCM has 111 bytes free in the full
   build.
 - Door bank 0D has approximately 7.3 KiB free.
 - Pusher banks 02 and 03 intentionally have only 64 bytes free each.
@@ -79,7 +80,8 @@ region because the linker memory area uses `fill=yes`.
 | 64-67 | World and weapon sprites |
 | 68-124 | Unused gap |
 | 125 | Runtime HUD copy |
-| 126-127 | Unused |
+| 126 | Unused |
+| 127 | Thirteen 4x4 animated HUD face frames |
 | 128-130 | Title |
 | 131-255 | Unused linker-filled tail |
 
@@ -122,7 +124,8 @@ other three advertised 8 KiB banks remain unused.
 |---|---:|---|
 | `$6000-$69FF` | 2,560 | Double compose buffers |
 | `$6A00-$6A0F` | 16 | Frame metadata, player state, active bitset |
-| `$6A10-$6A27` | 24 | Free |
+| `$6A10-$6A15` | 6 | HUD face animation state |
+| `$6A16-$6A27` | 18 | Free |
 | `$6A28-$6AFE` | 215 | HUD, weapon, thing, combat, and monster state |
 | `$6AFF` | 1 | Free |
 | `$6B00-$76FF` | 3,072 | Three four-page OAM sets |
@@ -132,7 +135,7 @@ other three advertised 8 KiB banks remain unused.
 | `$7F00-$7F12` | 19 | Music and audio state |
 | `$7F13-$7FFF` | 237 | Free |
 
-Bank 0 reserves approximately 6,184 bytes and leaves approximately 2,008
+Bank 0 reserves approximately 6,190 bytes and leaves approximately 2,002
 bytes free.
 
 ### Extended WRAM Status
@@ -148,7 +151,7 @@ Extended MMC5 WRAM is not currently used:
 
 ## Recommendations
 
-1. Use free PRG-ROM banks 09-0C for new systems and cold code.
+1. Use free PRG-ROM banks 0A-0C for new systems and cold code.
 2. Keep WRAM bank 0 for compose, OAM, audio, and interrupt-visible state.
 3. Use the three already-advertised extra WRAM banks for cold mutable data
    before increasing the cartridge to 128 KiB WRAM.
