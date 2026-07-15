@@ -5,14 +5,15 @@ Two modes:
   (default)      hand-authored 3-sector micro-map (M5)
   --wad WAD MAP  convert a real Doom map (BSP comes from the WAD): rescale,
                  split long segs, trim to a seg/byte budget by sector-BFS from
-                 the player start, splice the BSP over kept subsectors,
-                 select the top-15 wall textures (slot list -> texlist.json).
+                 the player start, splice the BSP over kept subsectors, and
+                 select wall textures (slot list -> texlist.json).
+  --full         retain the complete map and emit banked 12-byte seg records
+                 with 16-bit vertex endpoints.
 
 Engine data formats (must match src/bsp.s + src/render.s):
   vertex   4B  x, y                       s11.4 words
-  seg     10B  v1, vphase, v2, vphase_low, ulen, u0, tex, tex_low
-                (vertex indices are 8-bit; phases are normalized 0..255),
-                front, back ($FF = solid)
+  seg     10B  v1, vphase, v2, vphase_low, ulen, u0, tex, tex_low,
+                front, back ($FF = solid). Full maps append v1_hi, v2_hi.
   node    16B  px, py, pdx, pdy (s11.4), c0_idx, c0_isleaf, c1_idx, c1_isleaf,
                bbox x1,y1,x2,y2 (page bytes = s11.4 >> 8, subtree union)
                side 0 (child 0) when (x-px)*pdy - (y-py)*pdx >= 0
@@ -40,7 +41,7 @@ def words(v):
 
 
 def emit_map(path, verts, segs, nodes, subsectors, sectors, root, player,
-             eye_rel, reject=None):
+             eye_rel, reject=None, things=None, full=False):
     vdata = []
     for (x, y) in verts:
         vdata += words(x) + words(y)
@@ -52,6 +53,8 @@ def emit_map(path, verts, segs, nodes, subsectors, sectors, root, player,
         sdata += [v1 & 0xFF, vphase, v2 & 0xFF, vphase_l]
         sdata += [ulen & 0xFF, u0 & 0xFF, tex, texl, front,
                   0xFF if back is None else back]
+        if full:
+            sdata += [(v1 >> 8) & 0xFF, (v2 >> 8) & 0xFF]
     ndata = []
     for (px, py, pdx, pdy, c0, c1, bbox) in nodes:
         ndata += words(px) + words(py) + words(pdx) + words(pdy)
@@ -62,6 +65,22 @@ def emit_map(path, verts, segs, nodes, subsectors, sectors, root, player,
     ss_first = [s[0] for s in subsectors]
     ss_count = [s[1] for s in subsectors]
     ss_sector = [s[2] for s in subsectors]
+    thing_groups = things if things is not None else [[] for _ in subsectors]
+    assert len(thing_groups) == len(subsectors)
+    ss_thing_first = []
+    ss_thing_count = []
+    thing_x, thing_y, thing_kind = [], [], []
+    monster_thing_idx, monster_spawn_ss = [], []
+    for ss_index, group in enumerate(thing_groups):
+        ss_thing_first.append(len(thing_kind))
+        ss_thing_count.append(len(group))
+        for x, y, kind in group:
+            if kind == 4:
+                monster_thing_idx.append(len(thing_kind))
+                monster_spawn_ss.append(ss_index)
+            thing_x.append(x)
+            thing_y.append(y)
+            thing_kind.append(kind)
     # per-subsector bbox (page bytes) — leaf-level culling is much tighter
     # than the node unions
     ss_bb = []
@@ -84,15 +103,27 @@ def emit_map(path, verts, segs, nodes, subsectors, sectors, root, player,
                 if reject(i, j):
                     rej[i * rowb + (j >> 3)] |= 1 << (j & 7)
 
-    # LUT01 also holds sparse V-half tables and the 144-byte weapon OAM image.
+    # LUT01 also holds sector palettes, sparse V-half tables, and generated
+    # weapon/world metasprite data. Reserve enough for the enlarged close
+    # enemy frames so picture-dependent pattern dedup cannot affect map trim.
+    sprite_lut_reserve = 1280
     total = (len(vdata) + len(sdata) + len(ndata) + 8 * len(subsectors)
-             + 3 * len(sectors) + len(rej) + 16 * len(sectors) + 736 + 144)
-    assert total <= 8100, (f"map and sector palettes {total}B overflow "
-                           "the 8KB LUT01 bank")
+             + 3 * len(sectors) + len(rej) + 16 * len(sectors) + 736
+             + 2 * len(subsectors) + 5 * len(thing_kind)
+             + 2 * len(monster_thing_idx)
+             + sprite_lut_reserve)
+    if not full:
+        assert total <= 8100, (f"map and sector palettes {total}B overflow "
+                               "the 8KB LUT01 bank")
     assert len(nodes) <= 255 and len(subsectors) <= 255 and len(sectors) <= 254
-    # 256-vertex cap: the engine caches per-vertex view angles in a 256-entry
-    # table (vert_angle in render.s) and indexes it with the low index byte
-    assert len(verts) <= 256 and len(segs) <= 800
+    assert len(thing_kind) <= MAX_RUNTIME_THINGS
+    assert len(monster_thing_idx) <= MAX_RUNTIME_MONSTERS
+    assert all(v <= 255 for v in ss_thing_first + ss_thing_count)
+    if full:
+        assert len(verts) <= 0xFFFF and len(segs) <= 0xFFFF
+    else:
+        # The trimmed engine caches every vertex by its byte-sized index.
+        assert len(verts) <= 256 and len(segs) <= 800
 
     # camera clamp bounds (hi-byte compares in update_cam), 32 units inside
     xs = [v[0] for v in verts]
@@ -105,28 +136,61 @@ def emit_map(path, verts, segs, nodes, subsectors, sectors, root, player,
     px, py, ang = player
     with open(path, "w") as f:
         f.write("; GENERATED by tools/mapconv.py — do not edit\n")
-        f.write(".export map_verts, map_segs, map_nodes\n")
+        if full:
+            f.write(".export map_verts, map_segs0, map_segs1, map_nodes\n")
+            f.write(".export SEG_BANK_SPLIT : absolute\n")
+            f.write("SEG_BANK_SPLIT = 682\n")
+        else:
+            f.write(".export map_verts, map_segs, map_nodes\n")
         f.write(".export ss_first_lo, ss_first_hi, ss_count, ss_sector\n")
         f.write(".export ss_bx1, ss_by1, ss_bx2, ss_by2\n")
+        f.write(".export ss_thing_first, ss_thing_count\n")
+        f.write(".export thing_x_lo, thing_x_hi, thing_y_lo, thing_y_hi, thing_kind\n")
+        f.write(".export monster_thing_idx, monster_spawn_ss\n")
         f.write(".export sec_floor, sec_ceil, sec_light\n")
         for name, val in (("MAP_ROOT_NODE", root),
                           ("PLAYER_PX", int(px) & 0xFFFF),
                           ("PLAYER_PY", int(py) & 0xFFFF),
                           ("PLAYER_ANG", int(ang) & 0xFFFF),
                           ("EYE_REL", eye_rel),
+                          ("MAP_THING_COUNT", len(thing_kind)),
+                          ("MONSTER_COUNT", len(monster_thing_idx)),
                           ("REJECT_ROWB", rowb),
                           ("PX_MIN_H", pxmin_h), ("PX_MAX_H", pxmax_h),
                           ("PY_MIN_H", pymin_h), ("PY_MAX_H", pymax_h)):
             f.write(f".export {name} : absolute\n{name} = {val}\n")
         f.write(".export reject_tbl\n")
+        if full:
+            split = 682 * 12
+            assert len(sdata[:split]) <= 8192 and len(sdata[split:]) <= 8192
+            assert len(vdata) + len(ndata) <= 8192
+            f.write('.segment "MAPSEG0"\n')
+            f.write(f"map_segs0:\n{byte_rows(sdata[:split])}\n")
+            f.write('.segment "MAPSEG1"\n')
+            f.write(f"map_segs1:\n{byte_rows(sdata[split:])}\n")
+            f.write('.segment "MAPGEOM"\n')
+            f.write(f"map_verts:\n{byte_rows(vdata)}\n")
+            f.write(f"map_nodes:\n{byte_rows(ndata)}\n")
+            geometry = ()
+        else:
+            geometry = (("map_verts", vdata), ("map_segs", sdata),
+                        ("map_nodes", ndata))
         f.write('.segment "LUT01"\n')
-        for name, vals in (
-            ("map_verts", vdata), ("map_segs", sdata), ("map_nodes", ndata),
+        for name, vals in geometry + (
             ("ss_first_lo", [v & 0xFF for v in ss_first]),
             ("ss_first_hi", [v >> 8 for v in ss_first]),
             ("ss_count", ss_count), ("ss_sector", ss_sector),
             ("ss_bx1", [b[0] for b in ss_bb]), ("ss_by1", [b[1] for b in ss_bb]),
             ("ss_bx2", [b[2] for b in ss_bb]), ("ss_by2", [b[3] for b in ss_bb]),
+            ("ss_thing_first", ss_thing_first),
+            ("ss_thing_count", ss_thing_count),
+            ("thing_x_lo", [v & 0xFF for v in thing_x]),
+            ("thing_x_hi", [(v >> 8) & 0xFF for v in thing_x]),
+            ("thing_y_lo", [v & 0xFF for v in thing_y]),
+            ("thing_y_hi", [(v >> 8) & 0xFF for v in thing_y]),
+            ("thing_kind", thing_kind),
+            ("monster_thing_idx", monster_thing_idx),
+            ("monster_spawn_ss", monster_spawn_ss),
             ("sec_floor", [v & 0xFF for v in [s[0] for s in sectors]]),
             ("sec_ceil", [v & 0xFF for v in [s[1] for s in sectors]]),
             ("sec_light", [s[2] for s in sectors]),
@@ -135,7 +199,7 @@ def emit_map(path, verts, segs, nodes, subsectors, sectors, root, player,
             f.write(f"{name}:\n{byte_rows(vals)}\n")
     print(f"wrote {path}: {len(verts)} verts, {len(segs)} segs, "
           f"{len(nodes)} nodes, {len(subsectors)} ss, {len(sectors)} sectors, "
-          f"{total}B")
+          f"{len(thing_kind)} things, {total}B")
 
 
 # ---------------------------------------------------------------- micro map --
@@ -230,6 +294,9 @@ def build_micro():
 # ------------------------------------------------------------------ WAD map --
 SCALE = 0.4          # world units multiplier (keeps s11.4 deltas in int16)
 EYE_WAD = round(41 * SCALE)
+THING_SKILL_FLAG = 0x02  # medium, until runtime skill selection exists
+MAX_RUNTIME_THINGS = 64
+MAX_RUNTIME_MONSTERS = 8
 # texture slots are budget-driven (banks 0-59; flats fixed at 60): see
 # the selection loop in convert_wad
 BYTE_BUDGET = 7900
@@ -254,8 +321,11 @@ def vertical_phase(kind, front_floor, front_ceil, back_floor, back_ceil,
     return ((anchor + row_offset - top) % tex_height) * 256 // tex_height
 
 
-def convert_wad(wadpath, mapname):
-    import wadlib
+def convert_wad(wadpath, mapname, full=False):
+    try:
+        import wadlib
+    except ModuleNotFoundError:
+        from tools import wadlib
     wad = wadlib.Wad(wadpath)
     m = wadlib.parse_map(wad, mapname)
     texdefs = wadlib.texture_defs(wad)
@@ -349,20 +419,23 @@ def convert_wad(wadpath, mapname):
         nn = len(m["nodes"])  # upper bound
         return 4 * nv + 10 * nseg + 12 * nn + 4 * len(ss_k) + 3 * len(kept)
 
-    kept = {start_sec}
-    frontier = [start_sec]
-    while frontier:
-        nxt = []
-        for s in frontier:
-            for t in sorted(adj.get(s, ())):
-                if t in kept:
-                    continue
-                trial = kept | {t}
-                if cost(trial) > BYTE_BUDGET:
-                    continue
-                kept.add(t)
-                nxt.append(t)
-        frontier = nxt
+    if full:
+        kept = set(range(len(m["sectors"])))
+    else:
+        kept = {start_sec}
+        frontier = [start_sec]
+        while frontier:
+            nxt = []
+            for s in frontier:
+                for t in sorted(adj.get(s, ())):
+                    if t in kept:
+                        continue
+                    trial = kept | {t}
+                    if cost(trial) > BYTE_BUDGET:
+                        continue
+                    kept.add(t)
+                    nxt.append(t)
+            frontier = nxt
 
     kept_ss = [i for i, s in enumerate(ss_sector) if s in kept and ss_segs[i]]
     kept_ss_set = set(kept_ss)
@@ -424,7 +497,10 @@ def convert_wad(wadpath, mapname):
     # (span = 16h/z, near clip z = 16 => span_max = h units), so short
     # textures never reach tall height classes and skip baking them.
     from collections import Counter
-    from tilegen import CLASSES as TG_CLASSES, CLASS_PHASES
+    try:
+        from tilegen import CLASSES as TG_CLASSES, CLASS_PHASES
+    except ModuleNotFoundError:
+        from tools.tilegen import CLASSES as TG_CLASSES, CLASS_PHASES
     texcount = Counter()
     texh = {}
     for i in kept_ss:
@@ -601,6 +677,18 @@ def convert_wad(wadpath, mapname):
     ppx, ppy = s114(sx, sy)
     pang = round(sang * 65536 / 360) & 0xFFFF
 
+    world_thing_kind = {2014: 0, 2015: 1, 2019: 2, 2035: 3, 3004: 4}
+    things = [[] for _ in subsectors]
+    for tx, ty, _angle, thing_type, flags in m["things"]:
+        if (flags & 0x10 or not flags & THING_SKILL_FLAG or
+                thing_type not in world_thing_kind):
+            continue
+        old_ss = point_ss(tx, ty)
+        if old_ss not in kept_ss_set or ss_sector[old_ss] not in kept:
+            continue
+        x, y = s114(tx, ty)
+        things[ss_renum[old_ss]].append((x, y, world_thing_kind[thing_type]))
+
     # WAD REJECT lump: bit set = sector j not visible from sector i
     def reject(i_new, j_new):
         i, j = kept_sorted[i_new], kept_sorted[j_new]
@@ -609,7 +697,7 @@ def convert_wad(wadpath, mapname):
     print(f"trim: kept {len(kept)}/{len(m['sectors'])} sectors, "
           f"{len(kept_ss)}/{len(ss_segs)} subsectors; textures: {slots}")
     return (verts, segs, nodes, subsectors, sectors, root,
-            (ppx, ppy, pang), EYE_WAD, reject), \
+            (ppx, ppy, pang), EYE_WAD, reject, things), \
         {"slots": slots, "sec_tex": [dict(c) for c in sec_tex]}
 
 
@@ -618,15 +706,16 @@ def main():
     ap.add_argument("--wad")
     ap.add_argument("--map", default="E1M1")
     ap.add_argument("--texlist", help="output texture slot list (json)")
+    ap.add_argument("--full", action="store_true", help="emit the untrimmed map")
     ap.add_argument("-o", "--out", required=True)
     args = ap.parse_args()
 
     if args.wad:
-        emit_args, texinfo = convert_wad(args.wad, args.map)
+        emit_args, texinfo = convert_wad(args.wad, args.map, args.full)
         if args.texlist:
             with open(args.texlist, "w") as f:
                 json.dump(texinfo, f)
-        emit_map(args.out, *emit_args)
+        emit_map(args.out, *emit_args, full=args.full)
     else:
         emit_map(args.out, *build_micro())
 

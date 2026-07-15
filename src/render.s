@@ -32,12 +32,40 @@
 .import PLAYER_PX, PLAYER_PY, PLAYER_ANG, EYE_REL
 .import PX_MIN_H, PX_MAX_H, PY_MIN_H, PY_MAX_H
 .import REJECT_ROWB, reject_tbl
+.ifdef E1M1
+.import ss_sector, ss_thing_first, ss_thing_count, thing_x_lo, thing_x_hi
+.import thing_y_lo, thing_y_hi, thing_kind
+.import MAP_THING_COUNT
+.import weapon_oam, weapon_frame_first, weapon_frame_count, weapon_scan_count
+.import WEAPON_FRAME_COUNT, WEAPON_SLOT_CAP
+.import world_kind_meta_base, world_kind_frame_mask, world_kind_world_h
+.import world_meta_first, world_meta_count
+.import world_sprite_dx, world_sprite_dy, world_sprite_tile, world_sprite_attr
+.import barrel_exp_meta_first, barrel_exp_meta_count
+.import barrel_exp_dx, barrel_exp_dy, barrel_exp_tile, barrel_exp_attr
+.import monster_thing_idx, MONSTER_COUNT
+.import update_enemies
+.endif
 .export render_frame, init_camera, do_seg
+.ifdef E1M1
+.export draw_subsector_things, init_oam_set
+.endif
 
 .segment "BSS"
 vang:    .res 256           ; per-vertex view angle (BAM hi-byte)
 vstamp:  .res 256           ; generation when this vertex was computed
 vflags:  .res 256           ; bit 7: too close for a reliable angle
+.ifdef E1M1
+spr_scan_count:  .res 160    ; exact software enforcement of the PPU limit
+spr_floor:       .res 1
+spr_things_left: .res 1
+spr_cells_left:  .res 1
+spr_exploding:   .res 1
+spr_exp_emitted: .res 1
+spr_monster:      .res 1
+spr_current_ss:   .res 1
+spr_frame:        .res 1
+.endif
 
 NEAR    = 256               ; s11.4: 16 world units
 TURN    = 512               ; BAM per pass (~2.8 deg)
@@ -70,14 +98,38 @@ init_camera:
     rts
 
 render_frame:
+.ifdef FULL_E1M1
+    lda #MAP_COMMON_BANK
+    sta MMC5_PRG_A000
+.endif
     lda frame_cnt
     sta rf_t0
     lda #0
     sta cols_drawn
     sta segs_drawn
     sta nodes_visited
-    jsr read_input
+    jsr consume_input
     jsr update_cam
+.ifdef E1M1
+    ; NMI counts shots independently of the slower renderer. One BSP pass
+    ; finds the nearest visible barrel for the entire wrapped delta.
+    lda SHOT_COUNT
+    tax
+    sec
+    sbc SHOT_SEEN
+    sta SHOT_PENDING
+    stx SHOT_SEEN
+    beq :+
+    lda #$FF
+    sta SHOT_TARGET
+    sta SHOT_BEST_LO
+    lda #$7F
+    sta SHOT_BEST_HI
+:
+    jsr expire_explosions
+    jsr collect_pickups
+    jsr update_enemies
+.endif
     jsr find_sector     ; -> cam_sec; eye follows the camera's sector floor
     ldx cam_sec
     lda sec_floor,x
@@ -93,19 +145,18 @@ render_frame:
     lda cam_sec
     sta BUFA_PAL_SEC,x
 .endif
-    ; rj_ptr = reject_tbl + cam_sec * REJECT_ROWB (tiny per-frame multiply)
-    lda #0
-    ldx cam_sec
-    beq :++
-:   clc
-    adc #<REJECT_ROWB
-    dex
-    bne :-
-:   clc
+    ; rj_ptr = reject_tbl + cam_sec * REJECT_ROWB. Keep both product bytes so
+    ; maps whose REJECT rows cross a page retain the same behavior as E1M1.
+    lda cam_sec
+    sta MMC5_MULT_A
+    lda #<REJECT_ROWB
+    sta MMC5_MULT_B
+    lda MMC5_MULT_A
+    clc
     adc #<reject_tbl
     sta rj_ptr
-    lda #>reject_tbl
-    adc #0
+    lda MMC5_MULT_B
+    adc #>reject_tbl
     sta rj_ptr+1
     lda front_buf
     eor #1
@@ -116,6 +167,12 @@ render_frame:
     asl
     asl
     sta rf_backoff
+.ifdef E1M1
+    ldx rf_back
+    lda #0
+    sta BUFA_EXPLOSION_SOUND,x
+    jsr sprite_frame_begin
+.endif
     ; Invalidate the angle cache with one generation increment.  On the rare
     ; wrap, clear stamps so old generation 1 entries cannot become valid.
     inc vang_gen
@@ -129,27 +186,31 @@ render_frame:
     inc vang_gen
 @cache_ready:
     jsr render_bsp
+.ifdef E1M1
+    jsr resolve_pending_shots
+.endif
     lda frame_cnt
     sec
     sbc rf_t0
     sta pass_frames
     rts
 
-read_input:
-    lda #1
-    sta $4016
+; NMI owns joy_latched. Briefly disabling NMI around the exchange prevents a
+; direction sampled at the boundary from being cleared before the next pass.
+consume_input:
+    lda ppu2000_sh
+    and #$7F
+    sta $2000
+    lda joy_latched
+    sta joy_render
     lda #0
-    sta $4016
-    ldx #8
-@l: lda $4016
-    lsr
-    ror joy1
-    dex
-    bne @l
+    sta joy_latched
+    lda ppu2000_sh
+    sta $2000
     rts
 
 update_cam:
-    lda joy1
+    lda joy_render
     and #$40            ; Left: rotate CCW
     beq :+
     lda pang
@@ -159,7 +220,7 @@ update_cam:
     lda pang+1
     adc #>TURN
     sta pang+1
-:   lda joy1
+:   lda joy_render
     and #$80            ; Right: rotate CW
     beq :+
     lda pang
@@ -182,11 +243,11 @@ update_cam:
     sta vcos
     lda sin_hi,y
     sta vcos+1
-    lda joy1
+    lda joy_render
     and #$10            ; Up: forward (step = view dir / 2 = 8 units)
     beq :+
     jsr step_forward
-:   lda joy1
+:   lda joy_render
     and #$20            ; Down: back
     beq :+
     jsr step_back
@@ -478,6 +539,981 @@ mul_h_step:             ; A = h (SIGNED) -> A/X = (h * rzstep) >> 8, signed
     ldx mul_r+2
     rts
 
+.ifdef E1M1
+
+; Sprite scratch aliases are only live while no wall is being processed.
+spr_class  = cx1
+spr_entry  = cx1+1
+spr_cell_x = cx2
+spr_cell_y = cx2+1
+spr_tmp    = ulen
+spr_toprow = tclip
+
+shot_damage:
+    .byte 5, 10, 15
+
+; A = high byte of a four-page OAM set. Each page is initialized with one
+; generated weapon frame; unused weapon-envelope and world slots stay hidden.
+init_oam_set:
+    sta spr_oam_ptr+1
+    lda #0
+    sta spr_oam_ptr
+    sta spr_class
+@frame:
+    lda #$FF
+    ldy #0
+@hide:
+    sta (spr_oam_ptr),y
+    iny
+    bne @hide
+
+    ldx spr_class
+    lda weapon_frame_first,x
+    sta tptr
+    lda #0
+    sta tptr+1
+    asl tptr
+    rol tptr+1
+    asl tptr
+    rol tptr+1
+    lda tptr
+    clc
+    adc #<weapon_oam
+    sta tptr
+    lda tptr+1
+    adc #>weapon_oam
+    sta tptr+1
+    lda weapon_frame_count,x
+    asl
+    asl
+    sta spr_cells_left
+    ldy #0
+@copy:
+    lda (tptr),y
+    sta (spr_oam_ptr),y
+    iny
+    dec spr_cells_left
+    bne @copy
+    inc spr_oam_ptr+1
+    inc spr_class
+    lda spr_class
+    cmp #<WEAPON_FRAME_COUNT
+    bne @frame
+    rts
+
+; Collect pickups after movement so gameplay state and the following render
+; pass observe the same camera position. Distances are s11.4: a 16-unit radius
+; has squared radius 65536, represented by carry from the 16-bit square sum.
+collect_pickups:
+    ldx #0
+@thing:
+    cpx #<MAP_THING_COUNT
+    bcc :+
+    rts
+:
+    stx spr_thing
+    jsr thing_is_active
+    bne :+
+    jmp @next
+:
+    ldy spr_thing
+    lda thing_kind,y
+    cmp #3
+    bcc :+
+    jmp @next
+:
+
+    lda thing_x_lo,y
+    sec
+    sbc px
+    sta rt_dx
+    lda thing_x_hi,y
+    sbc px+1
+    sta rt_dx+1
+    bpl @xabs
+    lda #0
+    sec
+    sbc rt_dx
+    sta rt_dx
+    lda #0
+    sbc rt_dx+1
+    sta rt_dx+1
+@xabs:
+    lda rt_dx+1
+    beq :+
+    jmp @next
+:
+    lda rt_dx
+    sta spr_cell_x
+
+    lda thing_y_lo,y
+    sec
+    sbc py
+    sta rt_dy
+    lda thing_y_hi,y
+    sbc py+1
+    sta rt_dy+1
+    bpl @yabs
+    lda #0
+    sec
+    sbc rt_dy
+    sta rt_dy
+    lda #0
+    sbc rt_dy+1
+    sta rt_dy+1
+@yabs:
+    lda rt_dy+1
+    beq :+
+    jmp @next
+:
+    lda rt_dy
+    sta spr_cell_y
+
+    lda spr_cell_x
+    sta MMC5_MULT_A
+    sta MMC5_MULT_B
+    lda MMC5_MULT_A
+    sta rt_acc
+    lda MMC5_MULT_B
+    sta rt_acc+1
+    lda spr_cell_y
+    sta MMC5_MULT_A
+    sta MMC5_MULT_B
+    lda MMC5_MULT_A
+    clc
+    adc rt_acc
+    lda MMC5_MULT_B
+    adc rt_acc+1
+    bcs @next
+
+    ldy spr_thing
+    lda thing_kind,y
+    beq @health
+    cmp #1
+    beq @bonus_armor
+    ; ARM2 is left in the world when it cannot improve armor.
+    lda PL_ARMOR
+    cmp #200
+    bcs @next
+    lda #200
+    sta PL_ARMOR
+    lda #2
+    sta PL_ARMOR_TYPE
+    bne @consume
+@health:
+    lda PL_HEALTH
+    cmp #200
+    bcs @consume
+    inc PL_HEALTH
+    bne @consume
+@bonus_armor:
+    lda PL_ARMOR
+    cmp #200
+    bcs :+
+    inc PL_ARMOR
+:   lda PL_ARMOR_TYPE
+    bne @consume
+    lda #1
+    sta PL_ARMOR_TYPE
+@consume:
+    lda spr_thing
+    and #7
+    tax
+    lda pickup_bits,x
+    eor #$FF
+    sta spr_tmp
+    lda spr_thing
+    lsr
+    lsr
+    lsr
+    tay
+    lda THING_ACTIVE,y
+    and spr_tmp
+    sta THING_ACTIVE,y
+    lda #1
+    sta HUD_DIRTY
+    inc PICKUP_COUNT
+@next:
+    ldx spr_thing
+    inx
+    beq @done
+    jmp @thing
+@done:
+    rts
+
+thing_is_active:
+    lda spr_thing
+    lsr
+    lsr
+    lsr
+    tay
+    lda THING_ACTIVE,y
+    sta spr_tmp
+    lda spr_thing
+    and #7
+    tay
+    lda pickup_bits,y
+    and spr_tmp
+    rts
+
+pickup_bits:
+    .byte $01, $02, $04, $08, $10, $20, $40, $80
+
+; Expiration is simulation state, not visibility state. Scan every render so
+; offscreen death animations cannot wrap their byte-sized ages and replay.
+expire_explosions:
+    ldx #0
+@thing:
+    cpx #<MAP_THING_COUNT
+    bcs @done
+    stx spr_thing
+    jsr thing_is_active
+    beq @next
+    ldy spr_thing
+    lda thing_kind,y
+    cmp #3
+    beq @dead_kind
+    cmp #4
+    bne @next
+@dead_kind:
+    sta spr_frame
+    lda THING_HEALTH,y
+    bne @next
+    ldx #60
+    lda spr_frame
+    cmp #4
+    bne :+
+    ldx #96
+:   txa
+    sta spr_tmp
+    lda rf_t0
+    sec
+    sbc THING_DEATH_AT,y
+    cmp spr_tmp
+    bcc @next
+    lda spr_thing
+    and #7
+    tay
+    lda pickup_bits,y
+    eor #$FF
+    sta spr_tmp
+    lda spr_thing
+    lsr
+    lsr
+    lsr
+    tay
+    lda THING_ACTIVE,y
+    and spr_tmp
+    sta THING_ACTIVE,y
+@next:
+    ldx spr_thing
+    inx
+    bne @thing
+@done:
+    rts
+
+; Prepare all four pages in the OAM set paired with the back compose buffer.
+; The weapon owns 0..WEAPON_SLOT_CAP-1; world records mirror across pages.
+sprite_frame_begin:
+    lda #0
+    sta spr_oam_ptr
+    ldx rf_back
+    lda BUFA_OAM_SET,x
+    sta spr_oam_ptr+1
+    ldx #<WEAPON_FRAME_COUNT
+@frame:
+    lda #$FF
+    ldy #<(WEAPON_SLOT_CAP * 4)
+@hide:
+    sta (spr_oam_ptr),y
+    iny
+    bne @hide
+    inc spr_oam_ptr+1
+    dex
+    bne @frame
+    lda spr_oam_ptr+1
+    sec
+    sbc #<WEAPON_FRAME_COUNT
+    sta spr_oam_ptr+1
+    lda #<(WEAPON_SLOT_CAP * 4)
+    sta spr_oam_off
+
+    ; The generated maximum envelope is safe for every dynamic weapon frame.
+    ldx #0
+@counts:
+    lda weapon_scan_count,x
+    sta spr_scan_count,x
+    inx
+    cpx #160
+    bne @counts
+    rts
+
+; Called by the near-to-far BSP walk after leaf culling, before the leaf's
+; walls narrow ceil_clip/floor_clip. Existing clips therefore represent only
+; geometry in front of these things.
+draw_subsector_things:       ; X = subsector
+    stx spr_current_ss
+    lda ss_sector,x
+    tax
+    lda sec_floor,x
+    sta spr_floor
+    ldx spr_current_ss
+    lda ss_thing_count,x
+    beq @monsters
+    sta spr_things_left
+    lda ss_thing_first,x
+    sta spr_thing
+    lda #$FF
+    sta spr_monster
+@thing:
+    ldy spr_thing
+    lda thing_kind,y
+    cmp #4
+    beq @static_next
+    jsr project_world_thing
+@static_next:
+    inc spr_thing
+    dec spr_things_left
+    bne @thing
+@monsters:
+    ldx #0
+@monster:
+    cpx #<MONSTER_COUNT
+    bcs @done
+    stx spr_monster
+    lda MONSTER_SS,x
+    cmp spr_current_ss
+    bne @monster_next
+    lda monster_thing_idx,x
+    sta spr_thing
+    jsr project_world_thing
+@monster_next:
+    ldx spr_monster
+    inx
+    bne @monster
+@done:
+    rts
+
+project_world_thing:
+    jsr thing_is_active
+    bne :+
+    rts
+:
+    ldy spr_thing
+    lda thing_kind,y
+    cmp #4
+    bne @static_position
+    ldx spr_monster
+    lda MONSTER_X_LO,x
+    sta wx
+    lda MONSTER_X_HI,x
+    sta wx+1
+    lda MONSTER_Y_LO,x
+    sta wy
+    lda MONSTER_Y_HI,x
+    sta wy+1
+    jmp @position_ready
+@static_position:
+    lda thing_x_lo,y
+    sta wx
+    lda thing_x_hi,y
+    sta wx+1
+    lda thing_y_lo,y
+    sta wy
+    lda thing_y_hi,y
+    sta wy+1
+@position_ready:
+    jsr sub_cam
+    jsr zdot
+    lda ttz+1
+    bpl :+
+    rts
+:
+    cmp #>NEAR
+    bcs :+
+    rts
+:
+    bne @depth_ok
+    lda ttz
+    cmp #<NEAR
+    bcs @depth_ok
+    rts
+@depth_ok:
+    jsr xdot
+    jsr rzh_lookup
+    sta rzh1
+    stx rzh1+1
+
+    ; Screen center X = 128 + hi16(lateral * reciprocal depth).
+    lda ttx
+    sta mul_a
+    lda ttx+1
+    sta mul_a+1
+    lda rzh1
+    sta mul_b
+    lda rzh1+1
+    sta mul_b+1
+    jsr mul16s16u
+    lda mul_r+2
+    clc
+    adc #128
+    sta spr_x
+    lda mul_r+3
+    adc #0
+    beq :+
+    rts
+:
+    lda spr_x
+    and #$F8
+    sta spr_x
+
+    ; Project native thing height and choose its 8/16/32-pixel bake.
+    ldy spr_thing
+    lda thing_kind,y
+    tax
+    lda world_kind_world_h,x
+    sta mul_a
+    lda rzh1
+    sta mul_b
+    lda rzh1+1
+    sta mul_b+1
+    jsr mul8u16u
+    .repeat 4
+    lsr mul_r+2
+    ror mul_r+1
+    ror mul_r
+    .endrepeat
+    lda mul_r+1
+    cmp #4
+    bcs :+
+    rts
+:
+    ldx #0
+    cmp #12
+    bcc @class_ready
+    inx
+    cmp #24
+    bcc @class_ready
+    inx
+@class_ready:
+    stx spr_class
+
+    ; Floor baseline Y = horizon + (eye-floor) * reciprocal depth / 4096.
+    lda eye_h
+    sec
+    sbc spr_floor
+    sta mul_a
+    lda rzh1
+    sta mul_b
+    lda rzh1+1
+    sta mul_b+1
+    jsr mul8s16u
+    .repeat 4
+    lda mul_r+3
+    cmp #$80
+    ror mul_r+3
+    ror mul_r+2
+    ror mul_r+1
+    ror mul_r
+    .endrepeat
+    lda mul_r+1
+    clc
+    adc #80
+    sta spr_y
+    lda mul_r+2
+    adc #0
+    beq :+
+    rts
+:
+    lda spr_y
+    and #$F8
+    sta spr_y
+
+    ; Hitscan admission uses the BSP clip at the center column, independent
+    ; of metasprite cell/OAM capacity. Dead barrels remain for BEXP rendering
+    ; but can no longer become candidates.
+    jsr consider_shot_candidate
+
+    ldy spr_thing
+    lda thing_kind,y
+    cmp #3
+    beq @barrel
+    cmp #4
+    beq @zombie
+    jmp @normal_sprite
+@barrel:
+    lda THING_HEALTH,y
+    beq :+
+    jmp @normal_sprite
+:
+    lda rf_t0
+    sec
+    sbc THING_DEATH_AT,y
+    cmp #60
+    bcc @explosion_frame
+    lda spr_thing
+    and #7
+    tax
+    lda pickup_bits,x
+    eor #$FF
+    sta spr_tmp
+    lda spr_thing
+    lsr
+    lsr
+    lsr
+    tay
+    lda THING_ACTIVE,y
+    and spr_tmp
+    sta THING_ACTIVE,y
+    rts
+
+@explosion_frame:
+    ldx #0
+    cmp #9
+    bcc @explosion_entry
+    inx
+    cmp #17
+    bcc @explosion_entry
+    inx
+    cmp #26
+    bcc @explosion_entry
+    inx
+    cmp #43
+    bcc @explosion_entry
+    inx
+@explosion_entry:
+    txa
+    asl                     ; frame * 2 + min(scale class, 1)
+    ldx spr_class
+    beq :+
+    clc
+    adc #1
+:   tay
+    lda #1
+    sta spr_exploding
+    lda #0
+    sta spr_exp_emitted
+    inc EXPLOSION_RENDER_COUNT
+    lda barrel_exp_meta_first,y
+    sta spr_entry
+    lda barrel_exp_meta_count,y
+    sta spr_cells_left
+    bne @cell
+
+@zombie:
+    lda #0
+    sta spr_exploding
+    lda THING_HEALTH,y
+    beq @zombie_dead
+    ldx spr_monster
+    lda rf_t0
+    sec
+    sbc MONSTER_LAST_ATTACK,x
+    cmp #16
+    bcs @zombie_walk
+    ldx #2
+    cmp #8
+    bcc @zombie_frame_ready
+    inx
+    bne @zombie_frame_ready
+@zombie_walk:
+    lda rf_t0
+    lsr
+    lsr
+    lsr
+    and #1
+    tax
+    jmp @zombie_frame_ready
+@zombie_dead:
+    lda rf_t0
+    sec
+    sbc THING_DEATH_AT,y
+    ldx #4
+    cmp #16
+    bcc @zombie_frame_ready
+    inx
+    cmp #40
+    bcc @zombie_frame_ready
+    inx
+@zombie_frame_ready:
+    stx spr_frame
+    ldx #4
+    jmp @world_metadata
+
+    ; Metadata is ordered kind, animation frame, scale class.
+@normal_sprite:
+    lda #0
+    sta spr_exploding
+    ldy spr_thing
+    lda thing_kind,y
+    tax
+    lda world_kind_frame_mask,x
+    sta spr_tmp
+    lda rf_t0
+    lsr
+    lsr
+    lsr
+    and spr_tmp
+    sta spr_frame
+@world_metadata:
+    lda spr_frame
+    sta spr_entry
+    asl
+    clc
+    adc spr_entry          ; frame * 3
+    adc spr_class
+    adc world_kind_meta_base,x
+    tay
+    lda world_meta_first,y
+    sta spr_entry
+    lda world_meta_count,y
+    sta spr_cells_left
+@cell:
+    jsr emit_world_cell
+    inc spr_entry
+    dec spr_cells_left
+    bne @cell
+    lda spr_exploding
+    beq @out
+    lda spr_exp_emitted
+    beq @out
+    jsr queue_explosion_sound
+@out:
+    rts
+
+; Queue the report with the first composed BEXP frame, exactly once for this
+; thing. The pusher publishes the flag with the matching OAM set.
+queue_explosion_sound:
+    lda spr_thing
+    and #7
+    tay
+    lda pickup_bits,y
+    sta spr_tmp
+    lda spr_thing
+    lsr
+    lsr
+    lsr
+    tay
+    lda THING_EXP_SOUND_SENT,y
+    and spr_tmp
+    bne @done
+    lda THING_EXP_SOUND_SENT,y
+    ora spr_tmp
+    sta THING_EXP_SOUND_SENT,y
+    ldx rf_back
+    lda #1
+    sta BUFA_EXPLOSION_SOUND,x
+@done:
+    rts
+
+; Admit a live barrel or zombieman under the pistol's center ray when its class
+; overlaps the center-column opening left by nearer BSP geometry.
+consider_shot_candidate:
+    lda SHOT_PENDING
+    bne :+
+    rts
+:
+    ldy spr_thing
+    lda thing_kind,y
+    cmp #3
+    beq @shootable
+    cmp #4
+    beq @shootable
+    rts
+@shootable:
+    sta spr_frame
+    lda THING_HEALTH,y
+    beq @out
+    lda ttz+1
+    cmp #$33
+    bcc @range_ok
+    bne @out
+    lda ttz
+    cmp #$34
+    bcs @out
+@range_ok:
+    lda spr_frame
+    cmp #4
+    beq @zombie_lateral
+    lda ttx+1
+    beq @lateral_positive
+    cmp #$FF
+    bne @out
+    lda ttx
+    cmp #$C0
+    bcc @out
+    bcs @clip_test
+@lateral_positive:
+    lda ttx
+    cmp #$41
+    bcs @out
+    bcc @clip_test
+@zombie_lateral:
+    lda ttx+1
+    beq @zombie_positive
+    cmp #$FF
+    bne @out
+    lda ttx
+    cmp #$80
+    bcc @out
+    bcs @clip_test
+@zombie_positive:
+    lda ttx
+    cmp #$81
+    bcs @out
+@clip_test:
+    lda spr_y
+    lsr
+    lsr
+    lsr
+    sta spr_tmp             ; projected floor baseline in tile rows
+    cmp ceil_clip+16
+    beq @out
+    bcc @out
+    ldx spr_class
+    sec
+    sbc shot_class_rows,x
+    bcc @nearest
+    cmp floor_clip+16
+    bcs @out
+@nearest:
+    lda ttz+1
+    cmp SHOT_BEST_HI
+    bcc @select
+    bne @out
+    lda ttz
+    cmp SHOT_BEST_LO
+    bcs @out
+@select:
+    lda ttz
+    sta SHOT_BEST_LO
+    lda ttz+1
+    sta SHOT_BEST_HI
+    lda spr_thing
+    sta SHOT_TARGET
+@out:
+    rts
+
+shot_class_rows:
+    .byte 1, 2, 4
+
+; Apply one canonical pistol roll per latched shot to the selected actor.
+; Once it dies, remaining shots in this renderer batch have no live target.
+resolve_pending_shots:
+    lda SHOT_PENDING
+    beq shot_done
+    lda SHOT_TARGET
+    cmp #$FF
+    beq @miss
+    tay
+@hit:
+    inc HIT_COUNT
+    jsr roll_shot_damage
+    cmp THING_HEALTH,y
+    bcs shot_kill
+    sta spr_tmp
+    lda THING_HEALTH,y
+    sec
+    sbc spr_tmp
+    sta THING_HEALTH,y
+    dec SHOT_PENDING
+    bne @hit
+    beq shot_done
+@miss:
+    ; Doom rolls damage before tracing, so misses advance the sequence too.
+    jsr roll_shot_damage
+    dec SHOT_PENDING
+    bne @miss
+    beq shot_done
+shot_kill:
+    lda #0
+    sta THING_HEALTH,y
+    lda rf_t0
+    sta THING_DEATH_AT,y
+    lda thing_kind,y
+    cmp #3
+    bne :+
+    inc BARREL_KILLS
+    jmp shot_clear
+:   inc ZOMBIE_KILLS
+shot_clear:
+    lda #0
+    sta SHOT_PENDING
+shot_done:
+    rts
+
+roll_shot_damage:
+@reroll:
+    lda rng
+    lsr
+    bcc :+
+    eor #$B8
+:   sta rng
+    and #3
+    cmp #3
+    beq @reroll
+    tax
+    lda shot_damage,x
+    rts
+
+emit_world_cell:
+    lda spr_oam_off
+    cmp #$FC               ; reserve the final record instead of wrapping
+    bcc :+
+    rts
+:
+    ldy spr_entry
+
+    ; Signed grid offset plus projected origin, rejecting 8-bit overflow.
+    lda spr_exploding
+    beq :+
+    lda barrel_exp_dx,y
+    jmp @have_dx
+:   lda world_sprite_dx,y
+@have_dx:
+    bmi @xneg
+    clc
+    adc spr_x
+    bcc @xready
+    rts
+@xneg:
+    clc
+    adc spr_x
+    bcs @xready
+    rts
+@xready:
+    cmp #249
+    bcc :+
+    rts
+:
+    sta spr_cell_x
+
+    lda spr_exploding
+    beq :+
+    lda barrel_exp_dy,y
+    jmp @have_dy
+:   lda world_sprite_dy,y
+@have_dy:
+    bmi @yneg
+    clc
+    adc spr_y
+    bcc @yready
+    rts
+@yneg:
+    clc
+    adc spr_y
+    bcs @yready
+    rts
+@yready:
+    cmp #0                ; OAM Y=$FF is the hidden-sprite sentinel
+    bne :+
+    rts
+:
+    cmp #145              ; complete 16-pixel sprite must end in the view
+    bcc :+
+    rts
+:
+    sta spr_cell_y
+
+    ; Both 8-pixel halves must fit the clip window at this screen column.
+    lda spr_cell_x
+    lsr
+    lsr
+    lsr
+    tax
+    lda spr_cell_y
+    lsr
+    lsr
+    lsr
+    sta spr_toprow
+    cmp ceil_clip,x
+    bcs :+
+    rts
+:
+    clc
+    adc #1
+    cmp floor_clip,x
+    bcc :+
+    rts
+:
+    ; Enforce the hardware's eight-sprites-per-scanline limit in software.
+    ldx spr_cell_y
+    ldy #16
+@test_line:
+    lda spr_scan_count,x
+    cmp #8
+    bcs @out
+    inx
+    dey
+    bne @test_line
+
+    ldy spr_entry
+    lda spr_exploding
+    beq :+
+    lda barrel_exp_tile,y
+    jmp @have_tile
+:   lda world_sprite_tile,y
+@have_tile:
+    sta spr_tmp
+    lda spr_exploding
+    beq :+
+    lda barrel_exp_attr,y
+    jmp @have_attr
+:   lda world_sprite_attr,y
+@have_attr:
+    sta spr_toprow
+    ldy spr_oam_off
+    lda spr_cell_y
+    sec
+    sbc #1
+    jsr write_oam_all
+    iny
+    lda spr_tmp
+    jsr write_oam_all
+    iny
+    lda spr_toprow
+    jsr write_oam_all
+    iny
+    lda spr_cell_x
+    jsr write_oam_all
+    iny
+    sty spr_oam_off
+    lda spr_exploding
+    beq :+
+    lda #1
+    sta spr_exp_emitted
+    inc EXPLOSION_OAM_COUNT
+:
+
+    ldx spr_cell_y
+    ldy #16
+@claim_line:
+    inc spr_scan_count,x
+    inx
+    dey
+    bne @claim_line
+@out:
+    rts
+
+; Store one world-record byte at the same offset in every weapon-frame page.
+write_oam_all:
+    sta (spr_oam_ptr),y
+    inc spr_oam_ptr+1
+    sta (spr_oam_ptr),y
+    inc spr_oam_ptr+1
+    sta (spr_oam_ptr),y
+    inc spr_oam_ptr+1
+    sta (spr_oam_ptr),y
+    pha
+    lda spr_oam_ptr+1
+    sec
+    sbc #3
+    sta spr_oam_ptr+1
+    pla
+    rts
+
+.endif
+
 ; ---------------------------------------------------------------------------
 ; div_u: mtmp+2/3 = (uoz_acc << 16) / rzh1 — the exact perspective u at the
 ; interpolants' current position. Restoring division, 16 bits: the quotient
@@ -632,13 +1668,24 @@ clamp_row:              ; signed A -> clamped to [0, VIEW_ROWS]
     lda #0
     rts
 
-; fetch_vertex: Y = record offset of an 8-bit vertex index -> wx/wy.  The
-; following byte is a normalized vertical texture phase, not an index high byte.
+; fetch_vertex: Y = record offset of a vertex index -> wx/wy. Full-map segs
+; keep endpoint high bytes at offsets 10 and 11 to preserve all old fields.
 fetch_vertex:
     lda (wall_ptr),y
     sta tptr
+.ifdef FULL_E1M1
+    cpy #0
+    bne :+
+    ldy #10
+    bne @have_high_offset
+:   ldy #11
+@have_high_offset:
+    lda (wall_ptr),y
+    sta tptr+1
+.else
     lda #0
     sta tptr+1
+.endif
     asl tptr
     rol tptr+1
     asl tptr
@@ -650,6 +1697,10 @@ fetch_vertex:
     lda tptr+1
     adc #>map_verts
     sta tptr+1
+.ifdef FULL_E1M1
+    lda #MAP_GEOM_BANK
+    sta MMC5_PRG_A000
+.endif
     ldy #0
     lda (tptr),y
     sta wx
@@ -662,6 +1713,10 @@ fetch_vertex:
     iny
     lda (tptr),y
     sta wy+1
+.ifdef FULL_E1M1
+    lda #MAP_COMMON_BANK
+    sta MMC5_PRG_A000
+.endif
     rts
 
 ; set slice-LUT base pointers for a texture slot in A; X selects which pair
@@ -697,13 +1752,22 @@ set_texptrs:
     rts
 
 ; ---------------------------------------------------------------------------
-; vert_angle: X = vertex index (maps are capped at 256 vertices). Returns
+; vert_angle: A/X = vertex index high/low. Returns
 ; A = view angle of the vertex (BAM hi-byte) with C clear, or C set when the
 ; vertex is too close for a reliable atan. Cached per pass in vang/vdone/
 ; vnear so shared seg endpoints cost one atan per frame.
 ; ---------------------------------------------------------------------------
 vert_angle:
+    sta vmask
     stx vtmp
+.ifdef FULL_E1M1
+    ora #0
+    beq :+
+    ldy #1
+    sty FULL_HIGH_VERTEX_SEEN
+    bne @compute_uncached
+:
+.endif
     lda vstamp,x
     cmp vang_gen
     bne @compute
@@ -718,8 +1782,9 @@ vert_angle:
 @compute:
     lda vang_gen
     sta vstamp,x
+@compute_uncached:
     ; rt_dx/rt_dy = vertex - camera (map_verts is 4-byte records)
-    lda #0
+    lda vmask
     sta tptr+1
     lda vtmp
     asl
@@ -732,6 +1797,10 @@ vert_angle:
     lda tptr+1
     adc #>map_verts
     sta tptr+1
+.ifdef FULL_E1M1
+    lda #MAP_GEOM_BANK
+    sta MMC5_PRG_A000
+.endif
     ldy #0
     lda (tptr),y
     sec
@@ -750,8 +1819,16 @@ vert_angle:
     lda (tptr),y
     sbc py+1
     sta rt_dy+1
+.ifdef FULL_E1M1
+    lda #MAP_COMMON_BANK
+    sta MMC5_PRG_A000
+.endif
     jsr atan2_hi
     bcs @toonear
+.ifdef FULL_E1M1
+    ldx vmask
+    bne @uncached_ok
+.endif
     ldx vtmp
     sta vang,x
     lda #0
@@ -759,12 +1836,26 @@ vert_angle:
     lda vang,x
     clc
     rts
+.ifdef FULL_E1M1
+@uncached_ok:
+    clc
+    rts
+.endif
 @toonear:
+.ifdef FULL_E1M1
+    ldx vmask
+    bne @uncached_near
+.endif
     ldx vtmp
     lda #$80
     sta vflags,x
     sec
     rts
+.ifdef FULL_E1M1
+@uncached_near:
+    sec
+    rts
+.endif
 
 ; seg_deltas: camera-relative deltas of both endpoints -> dx1/dy1 (v1),
 ; rt_dx/rt_dy (v2)
@@ -793,15 +1884,37 @@ seg_deltas:
 ; survive (or whose angles are unreliable) touch the multiplier.
 ; ---------------------------------------------------------------------------
 do_seg:
+.ifdef FULL_E1M1
+    ldy #10
+    lda (wall_ptr),y
+    sta vmask
     ldy #0
     lda (wall_ptr),y
     tax
+    lda vmask
+.else
+    ldy #0
+    lda (wall_ptr),y
+    tax
+    lda #0
+.endif
     jsr vert_angle
     bcs @gf
     sta seg_a1
+.ifdef FULL_E1M1
+    ldy #11
+    lda (wall_ptr),y
+    sta vmask
     ldy #2
     lda (wall_ptr),y
     tax
+    lda vmask
+.else
+    ldy #2
+    lda (wall_ptr),y
+    tax
+    lda #0
+.endif
     jsr vert_angle
     bcs @gf
     sta seg_a2

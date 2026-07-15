@@ -122,14 +122,18 @@ the ROM is NES 2.0-legal but real hardware means a custom board.
 - The micro-map is hand-authored; a real WAD subset needs mapconv.py to
   parse/rescale WAD lumps and split segs on partition lines (mechanical, but
   unwritten). Doom-scale coordinates must rescale into s11.4 (±2047 units).
-- Full (untrimmed) E1M1 is deferred but scoped: 467 verts / ~816 split segs /
-  237 subsectors / 236 nodes / 85 sectors / 32 textures. Needs a second map
-  bank at $A000 (segs alone = 8160B), ss_*/sec_*/reject copied to PRG-RAM at
-  boot ($6A00-$7FFF free), a seg-record zp copy in do_seg across the bank
-  switch, frequency-sorted vertices so the 256-entry angle cache covers the
-  hottest (16-bit fallback for the rest), and nearest-color texture
-  substitution instead of mapconv's current "everything else -> slot 0".
-  Node/subsector byte indices still fit.
+- Full E1M1 is available as `make e1m1-full`: 533 converted vertices, 816
+  split segs, 237 subsectors, 236 nodes, 85 sectors, and 48 supported things
+  including four zombiemen.
+  Two `$A000` banks hold 12-byte staged seg records, one holds vertices/nodes,
+  and the common bank holds subsector/sector/REJECT/thing data. Vertex endpoint
+  indices are 16-bit; indices above 255 use the uncached angle path. Sector
+  palettes moved to fixed ROM so NMI is independent of the selected map bank.
+  Node/subsector byte indices still fit E1M1.
+- Sprite CHR uses six static 1KB world pages plus a two-page active weapon
+  frame selected in NMI. Close living zombiemen and their first death frame
+  use 32px bakes; fallen frames remain 16px. The line-160 HUD IRQ selects
+  ExAttr window 1 (physical bank 125), with NMI restoring window 0 for play.
 
 ## Scaling estimates to "real" content
 

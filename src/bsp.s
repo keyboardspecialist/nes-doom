@@ -9,17 +9,28 @@
 .include "mmc5.inc"
 .include "globals.inc"
 
+.ifdef E1M1
+.import draw_subsector_things
+.endif
+
 .import mul16s, do_seg, atan2_pg, angcol_tbl
+.ifdef FULL_E1M1
+.import map_segs0, map_segs1, map_nodes, SEG_BANK_SPLIT
+.else
 .import map_segs, map_nodes
+.endif
 .import ss_first_lo, ss_first_hi, ss_count, ss_sector
 .import ss_bx1, ss_by1, ss_bx2, ss_by2
 .import MAP_ROOT_NODE, REJECT_ROWB, reject_tbl
-.export render_bsp, find_sector, ceil_clip, floor_clip
+.export render_bsp, find_sector, find_subsector, ceil_clip, floor_clip
 
 .segment "BSS"
 ceil_clip:  .res 32
 floor_clip: .res 32
 bsp_stack:  .res 64         ; 32 entries x (idx, isleaf)
+.ifdef FULL_E1M1
+wall_record: .res 12
+.endif
 
 .segment "CODE"
 
@@ -27,6 +38,10 @@ bsp_stack:  .res 64         ; 32 entries x (idx, isleaf)
 ; bsp_node_ptr: tptr = &map_nodes[bsp_node]  (16-byte records)
 ; ---------------------------------------------------------------------------
 bsp_node_ptr:
+.ifdef FULL_E1M1
+    lda #MAP_GEOM_BANK
+    sta MMC5_PRG_A000
+.endif
     lda bsp_node
     sta tptr
     lda #0
@@ -426,6 +441,10 @@ render_bsp:
 
 ; ---------------------------------------------------------------------------
 draw_subsector:         ; X = subsector index
+.ifdef FULL_E1M1
+    lda #MAP_COMMON_BANK
+    sta MMC5_PRG_A000
+.endif
     ; WAD REJECT: skip the whole subsector if its sector is precomputed as
     ; invisible from the camera's sector (rj_ptr set in render_frame)
     lda ss_sector,x
@@ -459,13 +478,24 @@ draw_subsector:         ; X = subsector index
     tax
     bcc :+
     rts
-:   lda ss_first_lo,x
+:
+.ifdef E1M1
+    txa
+    pha
+    jsr draw_subsector_things
+    pla
+    tax
+.endif
+    lda ss_first_lo,x
     sta ss_idx
     lda ss_first_hi,x
     sta ss_idx_hi
     lda ss_count,x
     sta ss_n
 @sl:
+.ifdef FULL_E1M1
+    jsr stage_seg
+.else
     ; wall_ptr = map_segs + seg_idx*10  (idx*2 + idx*8)
     lda ss_idx
     sta wall_ptr
@@ -495,6 +525,7 @@ draw_subsector:         ; X = subsector index
     lda wall_ptr+1
     adc #>map_segs
     sta wall_ptr+1
+.endif
     jsr do_seg
     inc ss_idx
     bne :+
@@ -503,13 +534,78 @@ draw_subsector:         ; X = subsector index
     bne @sl
     rts
 
+.ifdef FULL_E1M1
+; Copy one 12-byte seg record from its ROM bank so do_seg can freely switch
+; the $A000 window while fetching 16-bit vertices and common map metadata.
+stage_seg:
+    lda ss_idx
+    sta wall_ptr
+    lda ss_idx_hi
+    sta wall_ptr+1
+    cmp #>SEG_BANK_SPLIT
+    bcc @bank0
+    bne @bank1
+    lda ss_idx
+    cmp #<SEG_BANK_SPLIT
+    bcc @bank0
+@bank1:
+    lda #1
+    sta FULL_SEG1_SEEN
+    lda wall_ptr
+    sec
+    sbc #<SEG_BANK_SPLIT
+    sta wall_ptr
+    lda wall_ptr+1
+    sbc #>SEG_BANK_SPLIT
+    sta wall_ptr+1
+    lda #MAP_SEG1_BANK
+    bne @bank_ready
+@bank0:
+    lda #MAP_SEG0_BANK
+@bank_ready:
+    sta MMC5_PRG_A000
+    ; record offset = local index * 12 = index * 4 + index * 8
+    asl wall_ptr
+    rol wall_ptr+1
+    asl wall_ptr
+    rol wall_ptr+1
+    lda wall_ptr
+    sta rt_acc
+    lda wall_ptr+1
+    sta rt_acc+1
+    asl wall_ptr
+    rol wall_ptr+1
+    lda wall_ptr
+    clc
+    adc rt_acc
+    sta wall_ptr
+    lda wall_ptr+1
+    adc rt_acc+1
+    clc
+    adc #$A0
+    sta wall_ptr+1
+    ldy #11
+@copy:
+    lda (wall_ptr),y
+    sta wall_record,y
+    dey
+    bpl @copy
+    lda #MAP_COMMON_BANK
+    sta MMC5_PRG_A000
+    lda #<wall_record
+    sta wall_ptr
+    lda #>wall_record
+    sta wall_ptr+1
+    rts
+.endif
+
 bit_tbl:
     .byte $01, $02, $04, $08, $10, $20, $40, $80
 
 ; ---------------------------------------------------------------------------
-; find_sector: point-locate the camera -> cam_sec (sector index)
+; find_subsector: point-locate px/py -> X (subsector index)
 ; ---------------------------------------------------------------------------
-find_sector:
+find_subsector:
     lda #0
     sta bsp_leaf
     lda #<MAP_ROOT_NODE
@@ -529,6 +625,15 @@ find_sector:
     jmp @walk
 @leaf:
     ldx bsp_node
+    rts
+
+; Point-locate the camera and load its sector.
+find_sector:
+    jsr find_subsector
+.ifdef FULL_E1M1
+    lda #MAP_COMMON_BANK
+    sta MMC5_PRG_A000
+.endif
     lda ss_sector,x
     sta cam_sec
     rts

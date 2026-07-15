@@ -11,11 +11,61 @@ BUFB_EX = $6780
 ; Camera-sector palette metadata travels with each compose buffer.  The
 ; pusher publishes it only after the final column reaches the nametable.
 BUFA_PAL_SEC = $6A00
+BUFA_OAM_SET = $6A02  ; one four-page set base byte per compose buffer
+PL_AMMO = $6A04
+PL_HEALTH = $6A05
+PL_ARMOR = $6A06
+PL_ARMOR_TYPE = $6A07
+THING_ACTIVE = $6A08  ; 8-byte active bitset, through $6A0F
+HUD_DIRTY = $6A28
+WEAPON_FRAME = $6A29
+WEAPON_TIMER = $6A2A
+SHOT_COUNT = $6A2B
+PICKUP_COUNT = $6A2C
+MAX_THINGS = 64
+MAX_MONSTERS = 8
+THING_HEALTH = $6A2D       ; 64 bytes, through $6A6C
+THING_DEATH_AT = $6A6D     ; 64 bytes, through $6AAC
+SHOT_SEEN = $6AAD
+SHOT_PENDING = $6AAE
+SHOT_TARGET = $6AAF
+SHOT_BEST_LO = $6AB0
+SHOT_BEST_HI = $6AB1
+HIT_COUNT = $6AB2
+BARREL_KILLS = $6AB3
+EXPLOSION_SOUND_PENDING = $6AB4
+BUFA_EXPLOSION_SOUND = $6AB5 ; frame-owned flags, one per compose buffer
+EXPLOSION_RENDER_COUNT = $6AB7
+THING_EXP_SOUND_SENT = $6AB8 ; 8-byte bitset for MAX_THINGS
+FULL_SEG1_SEEN = $6AC0
+FULL_HIGH_VERTEX_SEEN = $6AC1
+MONSTER_X_LO = $6AC2          ; 8 bytes each
+MONSTER_X_HI = $6ACA
+MONSTER_Y_LO = $6AD2
+MONSTER_Y_HI = $6ADA
+MONSTER_SS = $6AE2
+MONSTER_LAST_MOVE = $6AEA
+MONSTER_LAST_ATTACK = $6AF2
+ENEMY_SOUND_PENDING = $6AFA
+ZOMBIE_KILLS = $6AFB
+ENEMY_ATTACKS = $6AFC
+ENEMY_HITS = $6AFD
+EXPLOSION_OAM_COUNT = $6AFE
+; Three-set rotation: front/back compose ownership plus one stable DMA set.
+; Each set has one page per generated weapon frame.
+OAMA = $6B00
+OAMB = $6F00
+OAMC = $7300
 
 ; Pusher code banks (PRG02/PRG03 mapped at $8000 via $5114; bit7 = ROM)
 PUSH_BANK_A = $82
 PUSH_BANK_B = $83
 PUSH_JMP    = $8000     ; 32 x 3-byte JMP dispatch at the start of each pusher bank
+
+MAP_COMMON_BANK = $81   ; $A000 window in the untrimmed E1M1 build
+MAP_SEG0_BANK = $84
+MAP_SEG1_BANK = $85
+MAP_GEOM_BANK = $86
 
 ; Screen split: view rows 0-19 (lines 0-159), status bar rows 20-24 (lines
 ; 160-199), letterbox lines 200-240. A column costs ~410 cycles including
@@ -23,8 +73,9 @@ PUSH_JMP    = $8000     ; 32 x 3-byte JMP dispatch at the start of each pusher b
 ; the old 207-241 window and collided with NMI).
 ;   letterbox window: IRQ@199 -> NMI@241 = 42 lines ~ 4775 cycles;
 ;     entry ~130 + 10x410 + exit ~15 = 4245, ends ~line 236 (5-line margin)
-;   E1M1 vblank: entry ~30 + OAM DMA ~520 + 2x410 + palette/restore ~350
-;     = ~1720 of 2273; measured rendering restore is scanline 249-257
+;   E1M1 normal vblank: entry/input ~130 + OAM DMA ~520 + 2x410
+;     + palette/restore ~350 = ~1820 of 2273. A HUD upload reduces the quota
+;     to zero columns for that frame.
 STATUS_LINE = 160
 BLANK_LINE  = 199
 VIEW_MASK   = %00011110  ; BG + sprites in the 160-line view
@@ -48,7 +99,10 @@ PF_CLIP   = 36      ; angle-gate clip half-angle: 32 (45 deg) + atan slack;
 .ifdef E1M1
 FLAT_BANK = 60      ; WAD textures fill banks 0-59 (variable banks/texture)
 EDGE_BANK = 62      ; 128 sloped silhouette tiles (HUD sits at 61)
-WEAPON_BANK = 63    ; static weapon sprite tiles
+SPRITE_CHR_PAGE = 256 ; first of eight 1KB 8x16 sprite pages
+WORLD_SPRITE_PAGE_COUNT = 6
+WEAPON_SPRITE_PAGE_FIRST = 6
+HUD_CHR_WINDOW = 1  ; line-160 split: low ExAttr bank 61 -> physical bank 125
 .else
 FLAT_BANK = 12      ; 2 synthetic textures, 6 banks each
 .endif

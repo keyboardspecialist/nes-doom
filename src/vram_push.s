@@ -101,6 +101,14 @@ push_run:
     lda front_buf
     eor #1
     sta front_buf
+.ifdef E1M1
+    ; The old front buffer is now the renderer's back buffer. Give it the
+    ; display set released when the previous frame completed.
+    eor #1
+    tax
+    lda oam_free_set
+    sta BUFA_OAM_SET,x
+.endif
     lda #0
     sta push_col
     sta back_ready
@@ -126,6 +134,16 @@ push_run:
     ldx front_buf
     lda BUFA_PAL_SEC,x
     sta pal_sec
+    ; Publish OAM only when all columns from the same compose frame are on
+    ; screen. The old four-page display set stays stable until reassigned.
+    lda oam_dma_set
+    sta oam_free_set
+    lda BUFA_OAM_SET,x
+    sta oam_dma_set
+    lda BUFA_EXPLOSION_SOUND,x
+    beq :+
+    sta EXPLOSION_SOUND_PENDING
+:
 .endif
     inc flip_cnt            ; full frame on screen
     bne @next

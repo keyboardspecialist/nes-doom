@@ -2,6 +2,9 @@
 .export map_verts, map_segs, map_nodes
 .export ss_first_lo, ss_first_hi, ss_count, ss_sector
 .export ss_bx1, ss_by1, ss_bx2, ss_by2
+.export ss_thing_first, ss_thing_count
+.export thing_x_lo, thing_x_hi, thing_y_lo, thing_y_hi, thing_kind
+.export monster_thing_idx, monster_spawn_ss
 .export sec_floor, sec_ceil, sec_light
 .export MAP_ROOT_NODE : absolute
 MAP_ROOT_NODE = 75
@@ -13,6 +16,10 @@ PLAYER_PY = 9011
 PLAYER_ANG = 16384
 .export EYE_REL : absolute
 EYE_REL = 16
+.export MAP_THING_COUNT : absolute
+MAP_THING_COUNT = 16
+.export MONSTER_COUNT : absolute
+MONSTER_COUNT = 0
 .export REJECT_ROWB : absolute
 REJECT_ROWB = 4
 .export PX_MIN_H : absolute
@@ -352,6 +359,32 @@ ss_by2:
     .byte $33, $2C, $31, $2A, $29, $2A, $29, $29, $2A, $2A, $25, $23, $30, $30, $30, $31
     .byte $31, $31, $31, $34, $31, $36, $34, $40, $30, $2F, $30, $2C, $30, $2E, $2E, $29
     .byte $2B, $2B, $33, $33, $31, $35, $30, $33, $30, $2A, $23, $23, $23
+ss_thing_first:
+    .byte $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $01, $01, $01, $01, $01, $01
+    .byte $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $03, $04, $05
+    .byte $05, $06, $07, $07, $07, $07, $08, $08, $08, $08, $09, $09, $09, $0A, $0A, $0B
+    .byte $0B, $0B, $0B, $0B, $0C, $0C, $0E, $0E, $0E, $0E, $0E, $0E, $0E, $0E, $0E, $0E
+    .byte $0F, $0F, $0F, $10, $10, $10, $10, $10, $10, $10, $10, $10, $10
+ss_thing_count:
+    .byte $00, $00, $00, $00, $00, $00, $00, $00, $00, $01, $00, $00, $00, $00, $00, $00
+    .byte $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $02, $01, $01, $00
+    .byte $01, $01, $00, $00, $00, $01, $00, $00, $00, $01, $00, $00, $01, $00, $01, $00
+    .byte $00, $00, $00, $01, $00, $02, $00, $00, $00, $00, $00, $00, $00, $00, $00, $01
+    .byte $00, $00, $01, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+thing_x_lo:
+    .byte $CD, $00, $66, $CD, $CD, $9A, $9A, $9A, $00, $00, $CD, $9A, $9A, $00, $00, $00
+thing_x_hi:
+    .byte $44, $18, $16, $1A, $1A, $19, $19, $29, $38, $38, $2C, $29, $2F, $34, $22, $22
+thing_y_lo:
+    .byte $9A, $CD, $CD, $66, $33, $CD, $CD, $9A, $9A, $00, $66, $33, $CD, $CD, $00, $9A
+thing_y_hi:
+    .byte $2B, $2C, $2C, $2A, $2F, $30, $28, $25, $25, $2C, $2A, $33, $34, $34, $28, $31
+thing_kind:
+    .byte $02, $01, $01, $00, $00, $00, $00, $00, $00, $03, $03, $01, $01, $03, $01, $01
+monster_thing_idx:
+    ; empty
+monster_spawn_ss:
+    ; empty
 sec_floor:
     .byte $00, $00, $00, $00, $EA, $E0, $03, $03, $EA, $EA, $FD, $10, $16, $1D, $2A, $23
     .byte $FD, $00, $FA, $00, $FD, $03, $0A, $10, $10, $00

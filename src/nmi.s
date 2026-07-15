@@ -1,9 +1,9 @@
 ; NMI (scanline 241).
 ; M3+: vblank share of the band pusher, then full register restore. E1M1 also
-; refreshes static weapon OAM because the long letterbox blank stops OAM DRAM
-; refresh long enough to risk decay on hardware.
-; E1M1 pushes two columns because it also installs a buffered wall palette;
-; the micro-map pushes three.
+; refreshes buffered weapon/world OAM because the long letterbox blank stops
+; OAM DRAM refresh long enough to risk decay on hardware.
+; E1M1 normally pushes two columns because it also installs a buffered wall
+; palette; dynamic-HUD frames push one. The micro-map pushes three.
 ; The scanline IRQ must be re-armed here every frame: MMC5 in-frame detection
 ; stops while rendering is disabled, so after the letterbox the NMI is the
 ; only guaranteed wake-up.
@@ -13,7 +13,8 @@
 
 .import push_run
 .ifdef E1M1
-.import sec_pal
+.import sec_pal, hud_glyph_top, hud_glyph_bottom
+.import weapon_chr_page_lo, weapon_chr_page_hi
 .endif
 .export nmi_handler
 
@@ -26,14 +27,29 @@ nmi_handler:
     tya
     pha
 
+.ifdef E1M1
+    ; The status IRQ leaves ExAttr in HUD window 1. Restore the gameplay
+    ; background window while rendering is blank.
+    lda #0
+    sta MMC5_CHR_HI
+.endif
+
     inc frame_cnt
+    jsr read_input
 
 .ifdef E1M1
+    jsr update_weapon
+    jsr select_weapon_chr
+    jsr update_enemy_sound
+    jsr update_explosion_sound
+
     ; OAM is dynamic RAM and the long letterbox blank exceeds safe retention.
-    ; Refresh the unchanged static weapon page once per frame.
+    ; Select the live weapon frame within the published four-page set.
     lda #0
     sta $2003
-    lda #$02
+    lda oam_dma_set
+    clc
+    adc WEAPON_FRAME
     sta $4014
 .endif
 
@@ -43,12 +59,28 @@ nmi_handler:
     ; register restore below still leaves it consistent to resume)
     lda push_active
     bne @skippush
-    lda #EXRAM_MODE_RAM
-    sta MMC5_EXRAM_MODE
-    lda #%10001100      ; NMI on, inc-32
+.ifdef E1M1
+    lda HUD_DIRTY
+    beq @normal_quota
+    jsr upload_hud
+    lda #0              ; six HUD runs consume the full column-push budget
+    jmp @set_quota
+@normal_quota:
+    lda #NMI_QUOTA
+@set_quota:
+    sta push_quota
+    lda #%10001100      ; push_run requires increment-32
     sta $2000
+.else
     lda #NMI_QUOTA
     sta push_quota
+.endif
+    lda #EXRAM_MODE_RAM
+    sta MMC5_EXRAM_MODE
+.ifndef E1M1
+    lda #%10001100      ; NMI on, inc-32
+    sta $2000
+.endif
     jsr push_run
     lda #EXRAM_MODE_EXATTR
     sta MMC5_EXRAM_MODE
@@ -110,3 +142,227 @@ nmi_handler:
     tax
     pla
     rti
+
+; Poll once per NMI so brief taps are retained even during a long render pass.
+read_input:
+    lda joy1
+    sta joy1_prev
+    lda #0
+    sta joy1
+    lda #1
+    sta $4016
+    lda #0
+    sta $4016
+    ldx #8
+@bit:
+    lda $4016
+    lsr
+    ror joy1
+    dex
+    bne @bit
+    lda joy1
+    and #$F0
+    ora joy_latched
+    sta joy_latched
+    rts
+
+.ifdef E1M1
+
+select_weapon_chr:
+    ldx WEAPON_FRAME
+    lda weapon_chr_page_hi,x
+    sta MMC5_CHR_HI
+    lda weapon_chr_page_lo,x
+    sta MMC5_CHR_SPR0+WEAPON_SPRITE_PAGE_FIRST
+    clc
+    adc #1
+    sta MMC5_CHR_SPR0+WEAPON_SPRITE_PAGE_FIRST+1
+    lda #0
+    sta MMC5_CHR_HI
+    rts
+
+; Four-state pistol sequence: flash B, recoil C, recovery B, idle A.
+update_weapon:
+    lda WEAPON_TIMER
+    beq @ready
+    dec WEAPON_TIMER
+    bne @done
+    lda WEAPON_FRAME
+    cmp #1
+    bne :+
+    lda #2
+    sta WEAPON_FRAME
+    lda #4
+    sta WEAPON_TIMER
+    rts
+:   cmp #2
+    bne :+
+    lda #3
+    sta WEAPON_FRAME
+    lda #4
+    sta WEAPON_TIMER
+    rts
+:   lda #0
+    sta WEAPON_FRAME
+@ready:
+    lda WEAPON_FRAME
+    bne @done
+    lda joy1
+    and #$01            ; A fires; held A repeats after recovery
+    beq @done
+    lda PL_AMMO
+    beq @done
+    dec PL_AMMO
+    inc SHOT_COUNT
+    lda #1
+    sta HUD_DIRTY
+    sta WEAPON_FRAME
+    lda #5
+    sta WEAPON_TIMER
+    ; Restore the pistol's noise voice explicitly because an explosion uses
+    ; the same APU channel with a lower, louder report.
+    lda #$1B
+    sta $400C
+    lda #$04
+    sta $400E
+    lda #$18
+    sta $400F
+@done:
+    rts
+
+update_enemy_sound:
+    lda ENEMY_SOUND_PENDING
+    beq @done
+    lda #0
+    sta ENEMY_SOUND_PENDING
+    lda #$18
+    sta $400C
+    lda #$06
+    sta $400E
+    lda #$24
+    sta $400F
+@done:
+    rts
+
+update_explosion_sound:
+    lda EXPLOSION_SOUND_PENDING
+    beq @done
+    lda #0
+    sta EXPLOSION_SOUND_PENDING
+    lda #$1F            ; louder envelope, low noise period, longer report
+    sta $400C
+    lda #$0E
+    sta $400E
+    lda #$30
+    sta $400F
+@done:
+    rts
+
+; Convert A in 0..200 into right-aligned glyph indices. Zero remains visible.
+hud_convert:
+    sta nmi_hud_value
+    lda #10
+    sta nmi_hud_hund
+    sta nmi_hud_tens
+    lda nmi_hud_value
+    ldx #0
+@hundreds:
+    cmp #100
+    bcc @tens
+    sec
+    sbc #100
+    inx
+    bne @hundreds
+@tens:
+    cpx #0
+    beq :+
+    stx nmi_hud_hund
+:   ldy #0
+@tens_loop:
+    cmp #10
+    bcc @ones
+    sec
+    sbc #10
+    iny
+    bne @tens_loop
+@ones:
+    sta nmi_hud_ones
+    cpy #0
+    bne @store_tens
+    lda nmi_hud_hund
+    cmp #10
+    beq @converted
+@store_tens:
+    sty nmi_hud_tens
+@converted:
+    rts
+
+hud_line_top:
+    lda #<hud_glyph_top
+    sta nmi_glyph_ptr
+    lda #>hud_glyph_top
+    sta nmi_glyph_ptr+1
+    jmp hud_line
+
+hud_line_bottom:
+    lda #<hud_glyph_bottom
+    sta nmi_glyph_ptr
+    lda #>hud_glyph_bottom
+    sta nmi_glyph_ptr+1
+
+; X = low VRAM address, nmi_hud_value = run length (3 or 4).
+hud_line:
+    bit $2002
+    lda #$22
+    sta $2006
+    stx $2006
+    ldy nmi_hud_hund
+    lda (nmi_glyph_ptr),y
+    sta $2007
+    ldy nmi_hud_tens
+    lda (nmi_glyph_ptr),y
+    sta $2007
+    ldy nmi_hud_ones
+    lda (nmi_glyph_ptr),y
+    sta $2007
+    lda nmi_hud_value
+    cmp #4
+    bne @done
+    ldy #11
+    lda (nmi_glyph_ptr),y
+    sta $2007
+@done:
+    rts
+
+upload_hud:
+    lda #%10001000      ; increment-1 for six short horizontal runs
+    sta $2000
+    lda PL_AMMO
+    jsr hud_convert
+    lda #3
+    sta nmi_hud_value
+    ldx #$A2
+    jsr hud_line_top
+    ldx #$C2
+    jsr hud_line_bottom
+    lda PL_HEALTH
+    jsr hud_convert
+    lda #4
+    sta nmi_hud_value
+    ldx #$A6
+    jsr hud_line_top
+    ldx #$C6
+    jsr hud_line_bottom
+    lda PL_ARMOR
+    jsr hud_convert
+    lda #4
+    sta nmi_hud_value
+    ldx #$B4
+    jsr hud_line_top
+    ldx #$D4
+    jsr hud_line_bottom
+    lda #0
+    sta HUD_DIRTY
+    rts
+
+.endif

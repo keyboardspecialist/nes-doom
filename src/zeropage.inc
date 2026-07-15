@@ -19,10 +19,11 @@ rng         = $07
 heartbeat   = $08
 irq_cnt     = $09
 exram_ok    = $0A   ; $A5 = ExRAM mode-%10 round trip passed
-sleeping    = $0B
+oam_free_set = $0B  ; released display set assigned at the next buffer swap
 edge_top_tile = $0C ; exact interior-strip tile for a zero-row upper wall
 edge_bot_tile = $0D ; exact interior-strip tile for a zero-row lower wall
 vang_gen    = $0E   ; generation tag for the per-vertex angle cache
+oam_dma_set = $0F   ; high byte of the published four-page OAM set
 
 ; --- pusher $10-$1F ---
 push_buf    = $10
@@ -56,6 +57,11 @@ py          = $32
 pang        = $34   ; 16-bit BAM
 vsin        = $36   ; s0.8.8
 vcos        = $38
+spr_oam_off = $3A   ; next byte in the back OAM page
+spr_oam_ptr = $3B   ; 16-bit pointer to that page
+spr_thing   = $3D
+spr_x       = $3E   ; projected, grid-aligned origin
+spr_y       = $3F   ; projected, grid-aligned floor baseline
 
 ; --- bsp/render $40-$5F ---
 node_ptr    = $40
@@ -87,6 +93,13 @@ cur_phase   = $71
 sl_vp_l     = $72
 cur_vp      = $73
 phase_row   = $74   ; normalized phase converted to the selected class
+nmi_hud_value = $75 ; NMI-only HUD conversion/upload scratch
+nmi_hud_hund  = $76
+nmi_hud_tens  = $77
+nmi_hud_ones  = $78
+nmi_glyph_ptr = $79 ; 16-bit; NMI-only
+joy_latched   = $7B ; direction presses accumulated by NMI until a render pass
+joy_render    = $7C ; stable direction snapshot used by update_cam
 
 ; --- render frame state $50-$5F ---
 rf_t0       = $50

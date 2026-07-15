@@ -269,79 +269,389 @@ def projected_half_phase(phase, class_height):
 
 
 WEAPON_PALETTE = [0x0F, 0x00, 0x08, 0x27]
+SPRITE_PALETTES = WEAPON_PALETTE + [
+    0x0F, 0x30, 0x21, 0x11,     # health bonus: white/cyan/blue
+    0x0F, 0x30, 0x2A, 0x1A,     # armor bonus: white/bright/dark green
+    0x0F, 0x31, 0x21, 0x11,     # blue armor: pale/bright/dark blue
+]
+WORLD_SPRITES = [
+    (["BON1A0", "BON1B0"], 1, (1, 2, 3), (8, 16, 32)),
+    (["BON2A0", "BON2B0", "BON2C0", "BON2D0"], 2, (1, 2, 3), (8, 16, 32)),
+    (["ARM2A0"], 3, (1, 2, 3), (8, 16, 32)),
+    (["BAR1A0", "BAR1B0"], 0, (3, 1, 2), (8, 16, 32)),
+    (["POSSA1", "POSSC1", "POSSE1", "POSSF1",
+      "POSSH0", "POSSJ0", "POSSL0", "POSSL0"],
+     0, (3, 1, 2), ((8, 16, 32), (8, 16, 32),
+                     (8, 16, 32), (8, 16, 32),
+                     (8, 16, 32), (8, 16, 16),
+                     (8, 16, 16), (8, 16, 16))),
+]
+WORLD_CLASS_HEIGHTS = (8, 16, 32)
+WORLD_PATTERN_CAP = 192
+WEAPON_PATTERN_BASE = 192
+WEAPON_PATTERN_CAP = 64
+SPRITE_CHR_BASE_PAGE = 256
+WEAPON_CHR_BASE_PAGE = SPRITE_CHR_BASE_PAGE + 6
+BARREL_EXPLOSION_FRAMES = (
+    "BEXPA0", "BEXPB0", "BEXPC0", "BEXPD0", "BEXPE0",
+)
+BARREL_EXP_CLASS_HEIGHTS = (8, 16)
+WEAPON_FRAMES = (
+    ("PISGA0",),
+    ("PISGB0", "PISFA0"),
+    ("PISGC0",),
+    ("PISGB0",),
+)
+WEAPON_PATCH_GEOMETRY = {
+    "PISGA0": (44, 48, 102, 112),
+    "PISGB0": (50, 52, 92, 108),
+    "PISGC0": (42, 52, 102, 108),
+    "PISFA0": (26, 24, 115, 96),
+}
 
 
-def build_weapon(wadpath):
-    """Bake PISGA0 to a centered 48x64 8x8-sprite overlay."""
+def sprite_tile_byte(pattern):
+    """Map a logical 8x16 pattern number to the NES OAM tile byte."""
+    assert 0 <= pattern < 256
+    return ((pattern & 0x7F) << 1) | (pattern >> 7)
+
+
+def _sprite_thresholds(wadlib, wad, palette, names):
+    """Shared luminance tertiles keep contrast and animation frames stable."""
+    lums = []
+    for name in names:
+        _w, _h, _left, _top, source = wadlib.decode_picture(wad, name)
+        lums.extend(_lum(palette[index]) for row in source for index in row
+                    if index is not None)
+    lums.sort()
+    return lums[len(lums) // 3], lums[(2 * len(lums)) // 3]
+
+
+def _scaled_picture(wadlib, wad, palette, name, target_h, thresholds, levels):
+    """Area-scale a transparent Doom picture into a three-level ramp."""
+    src_w, src_h, _left, _top, source = wadlib.decode_picture(wad, name)
+    target_w = max(1, round(src_w * target_h / src_h))
+    out = [[0] * target_w for _ in range(target_h)]
+    for dy in range(target_h):
+        y0, y1 = dy * src_h / target_h, (dy + 1) * src_h / target_h
+        for dx in range(target_w):
+            x0, x1 = dx * src_w / target_w, (dx + 1) * src_w / target_w
+            total = (x1 - x0) * (y1 - y0)
+            opaque = 0.0
+            rgb = [0.0, 0.0, 0.0]
+            for sy in range(int(y0), min(src_h, int(y1 - 1e-9) + 1)):
+                wy = min(y1, sy + 1) - max(y0, sy)
+                for sx in range(int(x0), min(src_w, int(x1 - 1e-9) + 1)):
+                    wx = min(x1, sx + 1) - max(x0, sx)
+                    index = source[sy][sx]
+                    if index is None:
+                        continue
+                    weight = wx * wy
+                    opaque += weight
+                    color = palette[index]
+                    for k in range(3):
+                        rgb[k] += color[k] * weight
+            if opaque < total * 0.35:
+                continue
+            color = tuple(value / opaque for value in rgb)
+            lum = _lum(color)
+            out[dy][dx] = (levels[0] if lum >= thresholds[1] else
+                           levels[1] if lum >= thresholds[0] else levels[2])
+    return out
+
+
+def _horizontal_picture_rgb(wadlib, wad, palette, name, target_w):
+    """Area-resample a transparent picture horizontally, preserving height."""
+    src_w, src_h, _left, _top, source = wadlib.decode_picture(wad, name)
+    out = [[None] * target_w for _ in range(src_h)]
+    for y in range(src_h):
+        for dx in range(target_w):
+            x0 = dx * src_w / target_w
+            x1 = (dx + 1) * src_w / target_w
+            opaque = 0.0
+            rgb = [0.0, 0.0, 0.0]
+            for sx in range(int(x0), min(src_w, int(x1 - 1e-9) + 1)):
+                weight = min(x1, sx + 1) - max(x0, sx)
+                index = source[y][sx]
+                if index is None or weight <= 0:
+                    continue
+                opaque += weight
+                color = palette[index]
+                for k in range(3):
+                    rgb[k] += color[k] * weight
+            if opaque >= (x1 - x0) * 0.5:
+                out[y][dx] = tuple(value / opaque for value in rgb)
+    return out
+
+
+def _scaled_picture_rgb(wadlib, wad, palette, name, target_w, target_h):
+    """Area-resample a transparent picture in both axes, preserving RGB."""
+    src_w, src_h, _left, _top, source = wadlib.decode_picture(wad, name)
+    out = [[None] * target_w for _ in range(target_h)]
+    for dy in range(target_h):
+        y0, y1 = dy * src_h / target_h, (dy + 1) * src_h / target_h
+        for dx in range(target_w):
+            x0, x1 = dx * src_w / target_w, (dx + 1) * src_w / target_w
+            total = (x1 - x0) * (y1 - y0)
+            opaque = 0.0
+            rgb = [0.0, 0.0, 0.0]
+            for sy in range(int(y0), min(src_h, int(y1 - 1e-9) + 1)):
+                wy = min(y1, sy + 1) - max(y0, sy)
+                for sx in range(int(x0), min(src_w, int(x1 - 1e-9) + 1)):
+                    wx = min(x1, sx + 1) - max(x0, sx)
+                    index = source[sy][sx]
+                    if index is None:
+                        continue
+                    weight = wx * wy
+                    opaque += weight
+                    color = palette[index]
+                    for k in range(3):
+                        rgb[k] += color[k] * weight
+            if opaque >= total * 0.5:
+                out[dy][dx] = tuple(value / opaque for value in rgb)
+    return out
+
+
+def build_sprites(wadpath):
+    """Bake six static world pages and one two-page pair per weapon frame."""
     try:
         import wadlib
     except ModuleNotFoundError:
         from tools import wadlib
     wad = wadlib.Wad(wadpath)
     palette = wadlib.playpal(wad)
-    src_w, src_h, _left, _top, source = wadlib.decode_picture(wad, "PISGA0")
-    assert (src_w, src_h) == (57, 62)
-    scaled_w = (src_w * 4 + 2) // 5
-    assert scaled_w == 46
-
-    scaled = [[None] * scaled_w for _ in range(src_h)]
-    for y in range(src_h):
-        for dx in range(scaled_w):
-            start = dx * src_w / scaled_w
-            end = (dx + 1) * src_w / scaled_w
-            opaque = 0.0
-            rgb = [0.0, 0.0, 0.0]
-            sx0 = dx * src_w // scaled_w
-            sx1 = ((dx + 1) * src_w + scaled_w - 1) // scaled_w
-            for sx in range(sx0, sx1):
-                weight = max(0.0, min(end, sx + 1) - max(start, sx))
-                index = source[y][sx]
-                if index is None or weight == 0:
-                    continue
-                opaque += weight
-                color = palette[index]
-                for k in range(3):
-                    rgb[k] += color[k] * weight
-            if opaque < (end - start) * 0.5:
-                continue
-            scaled[y][dx] = tuple(value / opaque for value in rgb)
-
-    canvas = [[0] * 48 for _ in range(64)]
+    weapon_oam = []
+    weapon_frame_first, weapon_frame_count = [], []
+    weapon_frame_patterns = []
+    frame_scan_counts = []
     choices = [NES_PAL[index] for index in WEAPON_PALETTE[1:]]
-    for y in range(src_h):
-        for x in range(scaled_w):
-            color = scaled[y][x]
-            if color is None:
-                continue
-            canvas[y + 2][x + 1] = 1 + min(
-                range(3), key=lambda i: _wdist(color, choices[i]))
+    for layers in WEAPON_FRAMES:
+        frame_patterns = []
+        frame_pattern_ids = {}
 
-    tiles = []
-    tile_ids = {}
-    oam = []
-    scanline_counts = [0] * 160
-    for ty in range(8):
-        for tx in range(6):
-            pixels = [row[tx * 8:(tx + 1) * 8]
-                      for row in canvas[ty * 8:(ty + 1) * 8]]
-            encoded = encode_tile(pixels)
+        def weapon_pattern_id(pixels):
+            encoded = encode_tile(pixels[:8]) + encode_tile(pixels[8:])
             if not any(encoded):
-                continue
-            if encoded not in tile_ids:
-                tile_ids[encoded] = len(tiles)
-                tiles.append(encoded)
-            screen_y = 96 + ty * 8
-            oam.extend([screen_y - 1, tile_ids[encoded], 0, 104 + tx * 8])
-            for y in range(screen_y, screen_y + 8):
-                scanline_counts[y] += 1
+                return None
+            if encoded not in frame_pattern_ids:
+                frame_pattern_ids[encoded] = len(frame_patterns)
+                frame_patterns.append(encoded)
+            return frame_pattern_ids[encoded]
 
-    assert len(oam) == 36 * 4
-    assert len(tiles) <= 64
-    assert max(scanline_counts) <= 8
-    bank = bytearray()
-    for tile in tiles:
-        bank.extend(tile)
-    return bytes(bank.ljust(BANK_BYTES, b"\0")), oam
+        canvas = [[None] * 256 for _ in range(160)]
+        bounds = []
+        for name in layers:
+            target_w, target_h, screen_x, screen_y = WEAPON_PATCH_GEOMETRY[name]
+            image = _scaled_picture_rgb(
+                wadlib, wad, palette, name, target_w, target_h)
+            assert 0 <= screen_x and screen_x + target_w <= 256
+            assert 0 <= screen_y and screen_y + target_h <= 160
+            bounds.append((screen_x, screen_y, target_w, target_h))
+            for y, row in enumerate(image):
+                for x, color in enumerate(row):
+                    if color is not None:
+                        canvas[screen_y + y][screen_x + x] = color
+
+        quantized = [[0] * 256 for _ in range(160)]
+        for y, row in enumerate(canvas):
+            for x, color in enumerate(row):
+                if color is not None:
+                    quantized[y][x] = 1 + min(
+                        range(3), key=lambda i: _wdist(color, choices[i]))
+
+        x0 = min(x for x, _y, _w, _h in bounds) // 8 * 8
+        x1 = max(x + w for x, _y, w, _h in bounds)
+        x1 = (x1 + 7) // 8 * 8
+        y0 = min(y for _x, y, _w, _h in bounds) // 16 * 16
+        y1 = max(y + h for _x, y, _w, h in bounds)
+        y1 = (y1 + 15) // 16 * 16
+        assert 0 <= x0 < x1 <= 256 and 0 <= y0 < y1 <= 160
+
+        weapon_frame_first.append(len(weapon_oam) // 4)
+        scanline_counts = [0] * 160
+        for screen_y in range(y0, y1, 16):
+            for screen_x in range(x0, x1, 8):
+                pixels = [row[screen_x:screen_x + 8]
+                          for row in quantized[screen_y:screen_y + 16]]
+                pattern = weapon_pattern_id(pixels)
+                if pattern is None:
+                    continue
+                weapon_oam.extend([
+                    screen_y - 1,
+                    sprite_tile_byte(WEAPON_PATTERN_BASE + pattern),
+                    0, screen_x])
+                for y in range(screen_y, screen_y + 16):
+                    scanline_counts[y] += 1
+        count = len(weapon_oam) // 4 - weapon_frame_first[-1]
+        assert count > 0 and max(scanline_counts) <= 8
+        assert len(frame_patterns) <= WEAPON_PATTERN_CAP
+        weapon_frame_count.append(count)
+        weapon_frame_patterns.append(frame_patterns)
+        frame_scan_counts.append(scanline_counts)
+
+    weapon_scan_count = [max(counts[y] for counts in frame_scan_counts)
+                         for y in range(160)]
+    assert max(weapon_scan_count) <= 8
+    assert all(v <= 255 for v in weapon_frame_first + weapon_frame_count)
+
+    patterns = []
+    pattern_ids = {}
+
+    def pattern_id(pixels):
+        encoded = encode_tile(pixels[:8]) + encode_tile(pixels[8:])
+        if not any(encoded):
+            return None
+        if encoded not in pattern_ids:
+            pattern_ids[encoded] = len(patterns)
+            patterns.append(encoded)
+        return pattern_ids[encoded]
+
+    meta_first, meta_count = [], []
+    sprite_dx, sprite_dy, sprite_tile, sprite_attr = [], [], [], []
+    kind_base, kind_world_h = [], []
+    frame_masks = []
+    for names, attr, levels, class_heights in WORLD_SPRITES:
+        kind_base.append(len(meta_first))
+        frame_masks.append(len(names) - 1)
+        assert len(names) & (len(names) - 1) == 0
+        thresholds = _sprite_thresholds(wadlib, wad, palette, names)
+        native_h = None
+        for frame_index, name in enumerate(names):
+            _width, height, _left, _top, _source = wadlib.decode_picture(wad, name)
+            native_h = height if native_h is None else native_h
+            heights = (class_heights if isinstance(class_heights[0], int)
+                       else class_heights[frame_index])
+            for target_h in heights:
+                image = _scaled_picture(
+                    wadlib, wad, palette, name, target_h, thresholds, levels)
+                image_h, image_w = len(image), len(image[0])
+                image_x = -(image_w // 2)
+                image_y = -image_h
+                cell_x0 = (image_x // 8) * 8
+                cell_x1 = ((image_x + image_w + 7) // 8) * 8
+                cell_y0 = (image_y // 16) * 16
+                first = len(sprite_tile)
+                for dy in range(cell_y0, 0, 16):
+                    for dx in range(cell_x0, cell_x1, 8):
+                        pixels = []
+                        for py in range(16):
+                            sy = dy + py - image_y
+                            pixels.append([
+                                image[sy][dx + px - image_x]
+                                if (0 <= sy < image_h and
+                                    0 <= dx + px - image_x < image_w) else 0
+                                for px in range(8)
+                            ])
+                        pattern = pattern_id(pixels)
+                        if pattern is None:
+                            continue
+                        sprite_dx.append(dx & 0xFF)
+                        sprite_dy.append(dy & 0xFF)
+                        sprite_tile.append(sprite_tile_byte(pattern))
+                        sprite_attr.append(attr)
+                meta_first.append(first)
+                meta_count.append(len(sprite_tile) - first)
+                assert meta_count[-1] > 0
+        kind_world_h.append(max(1, round(native_h * 0.4)))
+
+    barrel_exp_meta_first, barrel_exp_meta_count = [], []
+    barrel_exp_dx, barrel_exp_dy = [], []
+    barrel_exp_tile, barrel_exp_attr = [], []
+    thresholds = _sprite_thresholds(
+        wadlib, wad, palette, BARREL_EXPLOSION_FRAMES)
+    for name in BARREL_EXPLOSION_FRAMES:
+        for target_h in BARREL_EXP_CLASS_HEIGHTS:
+            image = _scaled_picture(
+                wadlib, wad, palette, name, target_h, thresholds, (3, 1, 2))
+            image_h, image_w = len(image), len(image[0])
+            image_x = -(image_w // 2)
+            image_y = -image_h
+            cell_x0 = (image_x // 8) * 8
+            cell_x1 = ((image_x + image_w + 7) // 8) * 8
+            cell_y0 = (image_y // 16) * 16
+            first = len(barrel_exp_tile)
+            for dy in range(cell_y0, 0, 16):
+                for dx in range(cell_x0, cell_x1, 8):
+                    pixels = []
+                    for py in range(16):
+                        sy = dy + py - image_y
+                        pixels.append([
+                            image[sy][dx + px - image_x]
+                            if (0 <= sy < image_h and
+                                0 <= dx + px - image_x < image_w) else 0
+                            for px in range(8)
+                        ])
+                    pattern = pattern_id(pixels)
+                    if pattern is None:
+                        continue
+                    barrel_exp_dx.append(dx & 0xFF)
+                    barrel_exp_dy.append(dy & 0xFF)
+                    barrel_exp_tile.append(sprite_tile_byte(pattern))
+                    barrel_exp_attr.append(0)
+            barrel_exp_meta_first.append(first)
+            barrel_exp_meta_count.append(len(barrel_exp_tile) - first)
+            assert barrel_exp_meta_count[-1] > 0
+
+    assert len(barrel_exp_meta_first) == len(BARREL_EXPLOSION_FRAMES) * 2
+    assert len(barrel_exp_meta_count) == len(barrel_exp_meta_first)
+    assert len(barrel_exp_dx) == len(barrel_exp_tile)
+    assert len(barrel_exp_dy) == len(barrel_exp_tile)
+    assert len(barrel_exp_attr) == len(barrel_exp_tile)
+    assert len(patterns) <= WORLD_PATTERN_CAP
+    assert len(sprite_tile) <= 255
+    assert len(barrel_exp_tile) <= 255
+    assert all(v <= 255 for v in meta_first + meta_count)
+    assert all(v <= 255 for v in
+               barrel_exp_meta_first + barrel_exp_meta_count)
+    world_pattern_data = b"".join(patterns).ljust(6 * 1024, b"\0")
+    weapon_pattern_data = b"".join(
+        b"".join(frame).ljust(2 * 1024, b"\0")
+        for frame in weapon_frame_patterns)
+    pattern_data = (world_pattern_data + weapon_pattern_data).ljust(
+        4 * BANK_BYTES, b"\0")
+    assert len(pattern_data) == 4 * BANK_BYTES
+    weapon_chr_pages = [WEAPON_CHR_BASE_PAGE + frame * 2
+                        for frame in range(len(WEAPON_FRAMES))]
+    metadata = {
+        "sprite_palettes": SPRITE_PALETTES,
+        "weapon_oam": weapon_oam,
+        "weapon_frame_first": weapon_frame_first,
+        "weapon_frame_count": weapon_frame_count,
+        "weapon_frame_pattern_count": [len(frame) for frame in weapon_frame_patterns],
+        "weapon_chr_page_lo": [page & 0xFF for page in weapon_chr_pages],
+        "weapon_chr_page_hi": [page >> 8 for page in weapon_chr_pages],
+        "weapon_scan_count": weapon_scan_count,
+        "world_kind_meta_base": kind_base,
+        "world_kind_frame_mask": frame_masks,
+        "world_kind_world_h": kind_world_h,
+        "world_meta_first": meta_first,
+        "world_meta_count": meta_count,
+        "world_sprite_dx": sprite_dx,
+        "world_sprite_dy": sprite_dy,
+        "world_sprite_tile": sprite_tile,
+        "world_sprite_attr": sprite_attr,
+        "barrel_exp_meta_first": barrel_exp_meta_first,
+        "barrel_exp_meta_count": barrel_exp_meta_count,
+        "barrel_exp_dx": barrel_exp_dx,
+        "barrel_exp_dy": barrel_exp_dy,
+        "barrel_exp_tile": barrel_exp_tile,
+        "barrel_exp_attr": barrel_exp_attr,
+        "pattern_count": len(patterns),
+        "world_pattern_count": len(patterns),
+    }
+    lut01_names = ("sprite_palettes", "world_kind_meta_base",
+                   "world_kind_frame_mask", "world_kind_world_h",
+                   "world_meta_first", "world_meta_count", "world_sprite_dx",
+                   "world_sprite_dy", "world_sprite_tile", "world_sprite_attr",
+                   "barrel_exp_meta_first", "barrel_exp_meta_count",
+                   "barrel_exp_dx", "barrel_exp_dy", "barrel_exp_tile",
+                   "barrel_exp_attr")
+    fixed_names = ("weapon_frame_first", "weapon_frame_count",
+                   "weapon_frame_pattern_count", "weapon_chr_page_lo",
+                   "weapon_chr_page_hi", "weapon_scan_count", "weapon_oam")
+    assert sum(len(metadata[name]) for name in lut01_names) <= 0x2000
+    assert sum(len(metadata[name]) for name in fixed_names) <= 0x2000
+    return pattern_data, metadata
 
 
 def strip_ramp_err(rgb_rows, thr, ramp_rgbs):
@@ -670,7 +980,7 @@ def slice_banks(strips, max_cls, fixed_flat=None):
 
 def write_luts(path, slice_tile, slice_bank, ntex, max_cls, vperiod,
                bg_palettes, hud=None, sec_pal=None, vhalf=None,
-               weapon_oam=None):
+               sprite_meta=None):
     bases = [min(t, 15) * SLICES_PER_TEX for t in range(16)]
     tables = [("slice_tile", slice_tile), ("slice_bank", slice_bank),
               ("tex_base_lo", [b & 0xFF for b in bases]),
@@ -680,7 +990,9 @@ def write_luts(path, slice_tile, slice_bank, ntex, max_cls, vperiod,
               ("bg_palettes", bg_palettes)]
     if hud:
         tables += [("hud_nt", hud[0]), ("hud_ex", hud[1]),
-                   ("hud_palettes", HUD_PALETTES)]
+                    ("hud_palettes", HUD_PALETTES),
+                    ("hud_glyph_top", hud[2]),
+                    ("hud_glyph_bottom", hud[3])]
     with open(path, "w") as f:
         f.write("; GENERATED by tools/tilegen.py — do not edit\n")
         f.write(".export slice_tile, slice_bank, tex_base_lo, tex_base_hi\n")
@@ -689,8 +1001,26 @@ def write_luts(path, slice_tile, slice_bank, ntex, max_cls, vperiod,
         f.write(".export bg_palettes\n")
         if hud:
             f.write(".export hud_nt, hud_ex, hud_palettes\n")
-        if weapon_oam:
-            f.write(".export weapon_oam\n")
+            f.write(".export hud_glyph_top, hud_glyph_bottom\n")
+        if sprite_meta:
+            f.write(".export sprite_palettes, weapon_oam\n")
+            f.write(".export WEAPON_SPRITE_COUNT : absolute\n")
+            f.write(".export WEAPON_FRAME_COUNT : absolute\n")
+            f.write(".export WEAPON_SLOT_CAP : absolute\n")
+            f.write(".export WEAPON_PATTERN_BASE : absolute\n")
+            f.write(".export WORLD_PATTERN_COUNT : absolute\n")
+            f.write(".export weapon_frame_first, weapon_frame_count\n")
+            f.write(".export weapon_frame_pattern_count\n")
+            f.write(".export weapon_chr_page_lo, weapon_chr_page_hi\n")
+            f.write(".export weapon_scan_count\n")
+            f.write(".export world_kind_meta_base, world_kind_frame_mask\n")
+            f.write(".export world_kind_world_h\n")
+            f.write(".export world_meta_first, world_meta_count\n")
+            f.write(".export world_sprite_dx, world_sprite_dy\n")
+            f.write(".export world_sprite_tile, world_sprite_attr\n")
+            f.write(".export barrel_exp_meta_first, barrel_exp_meta_count\n")
+            f.write(".export barrel_exp_dx, barrel_exp_dy\n")
+            f.write(".export barrel_exp_tile, barrel_exp_attr\n")
         if sec_pal:
             f.write(".export sec_pal\n")
         f.write('.segment "LUT00"\n')
@@ -701,11 +1031,6 @@ def write_luts(path, slice_tile, slice_bank, ntex, max_cls, vperiod,
         # Sector palettes and sparse half-row slice tables live in the roomy
         # map bank; LUT00 has only a few hundred bytes of headroom.
         f.write('.segment "LUT01"\n')
-        if sec_pal:
-            f.write('sec_pal:\n')
-            for i in range(0, len(sec_pal), 16):
-                f.write("    .byte " + ", ".join(
-                    f"${v:02X}" for v in sec_pal[i:i+16]) + "\n")
         vhalf = vhalf or {}
         labels = []
         for idx in range(32):
@@ -725,11 +1050,42 @@ def write_luts(path, slice_tile, slice_bank, ntex, max_cls, vperiod,
             for i in range(0, len(vals), 16):
                 f.write("    .byte " + ", ".join(
                     f"${v:02X}" for v in vals[i:i+16]) + "\n")
-        if weapon_oam:
-            f.write("weapon_oam:\n")
-            for i in range(0, len(weapon_oam), 16):
-                f.write("    .byte " + ", ".join(
-                    f"${v:02X}" for v in weapon_oam[i:i+16]) + "\n")
+        if sprite_meta:
+            for name in ("sprite_palettes", "world_kind_meta_base",
+                         "world_kind_frame_mask", "world_kind_world_h",
+                         "world_meta_first", "world_meta_count",
+                         "world_sprite_dx", "world_sprite_dy",
+                         "world_sprite_tile", "world_sprite_attr",
+                         "barrel_exp_meta_first", "barrel_exp_meta_count",
+                         "barrel_exp_dx", "barrel_exp_dy", "barrel_exp_tile",
+                         "barrel_exp_attr"):
+                vals = sprite_meta[name]
+                f.write(f"{name}:\n")
+                for i in range(0, len(vals), 16):
+                    f.write("    .byte " + ", ".join(
+                        f"${v:02X}" for v in vals[i:i+16]) + "\n")
+            f.write('.segment "FIXED"\n')
+            if sec_pal:
+                f.write('sec_pal:\n')
+                for i in range(0, len(sec_pal), 16):
+                    f.write("    .byte " + ", ".join(
+                        f"${v:02X}" for v in sec_pal[i:i+16]) + "\n")
+            f.write(f"WEAPON_FRAME_COUNT = {len(WEAPON_FRAMES)}\n")
+            f.write("WEAPON_SLOT_CAP = "
+                    f"{max(sprite_meta['weapon_frame_count'])}\n")
+            f.write("WEAPON_SPRITE_COUNT = "
+                    f"{sprite_meta['weapon_frame_count'][0]}\n")
+            f.write(f"WEAPON_PATTERN_BASE = {WEAPON_PATTERN_BASE}\n")
+            f.write("WORLD_PATTERN_COUNT = "
+                    f"{sprite_meta['world_pattern_count']}\n")
+            for name in ("weapon_frame_first", "weapon_frame_count",
+                         "weapon_frame_pattern_count", "weapon_chr_page_lo",
+                         "weapon_chr_page_hi", "weapon_scan_count", "weapon_oam"):
+                vals = sprite_meta[name]
+                f.write(f"{name}:\n")
+                for i in range(0, len(vals), 16):
+                    f.write("    .byte " + ", ".join(
+                        f"${v:02X}" for v in vals[i:i+16]) + "\n")
 
 
 HUD_ROWS = 5              # status bar: tile rows 20-24 = 40 px, 32 cols
@@ -748,12 +1104,11 @@ HUD_PALETTES = [
 
 
 def build_hud(wadpath, bg_palettes, hud_bank):
-    """Compose the Doom status bar (STBAR + arms panel + face + baked
-    placeholder digits), scale 320x40 -> 256x40, quantize each 8x8 cell
-    against all 4 BG palettes (per-tile ExAttr palette choice; color 0 =
-    the backdrop is usable here since the bar is opaque), dedup tiles.
-    Returns (tiles bytes list, hud_nt[160], hud_ex[160])."""
-    import wadlib
+    """Compose the status-bar base and reusable tile-aligned 8x16 glyphs."""
+    try:
+        import wadlib
+    except ModuleNotFoundError:
+        from tools import wadlib
     wad = wadlib.Wad(wadpath)
     pal = wadlib.playpal(wad)
     W, H = 320, 40
@@ -761,20 +1116,6 @@ def build_hud(wadpath, bg_palettes, hud_bank):
     wadlib._draw_picture(wad, "STBAR", img, W, H, 0, 8)
     wadlib._draw_picture(wad, "STARMS", img, W, H, 104, 8)
     wadlib._draw_picture(wad, "STFST01", img, W, H, 143, 9)
-
-    def digits(s, right_x, y):
-        x = right_x
-        for ch in reversed(s):
-            name = "STTPRCNT" if ch == "%" else "STTNUM" + ch
-            d = wad.lump(name)
-            import struct
-            pw = struct.unpack_from("<hhhh", d, 0)[0]
-            x -= pw
-            wadlib._draw_picture(wad, name, img, W, H, x, y)
-
-    digits("50", 44, 11)                    # ammo
-    digits("100%", 104, 11)                 # health
-    digits("0%", 235, 11)                   # armor
 
     # RGB canvas (empty -> near-black), box-filter 320x40 -> 256x40
     rgb = [[pal[img[x][y]] if img[x][y] >= 0 else (12, 12, 12)
@@ -785,6 +1126,13 @@ def build_hud(wadpath, bg_palettes, hud_bank):
     pals = [[NES_PAL[HUD_PALETTES[p * 4 + c] & 0x3F] for c in range(4)]
             for p in range(4)]
     tiles, tmap = [], {}
+
+    def tile_id(encoded):
+        if encoded not in tmap:
+            tmap[encoded] = len(tiles)
+            tiles.append(encoded)
+        return tmap[encoded]
+
     hud_nt, hud_ex = [], []
     for row in range(HUD_ROWS):
         for col in range(32):
@@ -814,14 +1162,40 @@ def build_hud(wadpath, bg_palettes, hud_bank):
                 if best is None or err < best[0]:
                     best = (err, pi, idx)
             _, pi, idx = best
-            t = encode_tile(idx)
-            if t not in tmap:
-                tmap[t] = len(tiles)
-                tiles.append(t)
-            hud_nt.append(tmap[t])
+            hud_nt.append(tile_id(encode_tile(idx)))
             hud_ex.append(hud_bank | (pi << 6))
+
+    glyph_names = [f"STTNUM{i}" for i in range(10)] + [None, "STTPRCNT"]
+    glyph_top, glyph_bottom = [], []
+    digit_colors = pals[1][1:]
+    for name in glyph_names:
+        if name is None:
+            pixels = [[0] * 8 for _ in range(16)]
+        else:
+            _w, height, _left, _top, _source = wadlib.decode_picture(wad, name)
+            assert height == 16
+            image = _horizontal_picture_rgb(wadlib, wad, pal, name, 8)
+            pixels = [[
+                0 if color is None else 1 + min(
+                    range(3), key=lambda i: _wdist(color, digit_colors[i]))
+                for color in row
+            ] for row in image]
+        glyph_top.append(tile_id(encode_tile(pixels[:8])))
+        glyph_bottom.append(tile_id(encode_tile(pixels[8:])))
+
+    fields = (
+        (2, (10, 5, 0)),
+        (6, (1, 0, 0, 11)),
+        (20, (10, 10, 0, 11)),
+    )
+    for col, glyphs in fields:
+        for offset, glyph in enumerate(glyphs):
+            for row, table in ((1, glyph_top), (2, glyph_bottom)):
+                cell = row * 32 + col + offset
+                hud_nt[cell] = table[glyph]
+                hud_ex[cell] = hud_bank | (1 << 6)
     assert len(tiles) <= 256, f"HUD needs {len(tiles)} tiles"
-    return tiles, hud_nt, hud_ex
+    return tiles, hud_nt, hud_ex, glyph_top, glyph_bottom
 
 
 def edge_bank():
@@ -968,15 +1342,17 @@ def main():
                 bases[1] = ramp_bases[1]
             sec_pal.extend(derive_palettes(bases))
     hud = None
-    weapon_oam = None
+    hud_bank_data = None
+    sprite_meta = None
     if args.wad:
-        tiles, hud_nt, hud_ex = build_hud(args.wad, bg_palettes,
-                                          flat_bank + 1)
+        tiles, hud_nt, hud_ex, glyph_top, glyph_bottom = build_hud(
+            args.wad, bg_palettes, flat_bank + 1)
         bank = bytearray()
         for t in tiles:
             bank.extend(t)
-        data = data + bytes(bank.ljust(BANK_BYTES, b"\0"))
-        hud = (hud_nt, hud_ex)
+        hud_bank_data = bytes(bank.ljust(BANK_BYTES, b"\0"))
+        data = data + hud_bank_data
+        hud = (hud_nt, hud_ex, glyph_top, glyph_bottom)
         print(f"HUD: {len(tiles)} unique tiles in bank {flat_bank + 1}")
         ebank = bytearray()
         for t in edge_bank():
@@ -984,11 +1360,22 @@ def main():
         data = data + bytes(ebank.ljust(BANK_BYTES, b"\0"))
         print(f"edges: 128 sloped tiles in bank {flat_bank + 2}")
         assert len(data) == 63 * BANK_BYTES
-        weapon_bank, weapon_oam = build_weapon(args.wad)
-        data += weapon_bank
-        print(f"weapon: {len(weapon_oam) // 4} sprites in bank 63")
+        # Sprite pages are selected through retained $5130 bits and therefore
+        # begin at 256KB (1KB pages 256-263), after the legacy 64-bank range.
+        data = data.ljust(64 * BANK_BYTES, b"\0")
+        sprite_data, sprite_meta = build_sprites(args.wad)
+        data += sprite_data
+        print(f"sprites: {sprite_meta['world_pattern_count']} world patterns, "
+              f"{sprite_meta['weapon_frame_pattern_count']} weapon patterns, "
+              f"{sprite_meta['weapon_frame_count']} weapon cells, "
+              f"{len(sprite_meta['world_sprite_tile'])} world cells")
+        assert len(data) == 68 * BANK_BYTES
+        # The line-160 HUD split selects ExAttr window 1, so low bank 61 maps
+        # to physical 4KB bank 125. Keep the window-0 copy for diagnostics.
+        data = data.ljust(125 * BANK_BYTES, b"\0") + hud_bank_data
+        assert len(data) == 126 * BANK_BYTES
     write_luts(args.luts or "assets/build/luts.s", st, sb, len(strips),
-               max_cls, vperiod, bg_palettes, hud, sec_pal, vhalf, weapon_oam)
+               max_cls, vperiod, bg_palettes, hud, sec_pal, vhalf, sprite_meta)
     with open(args.out, "wb") as f:
         f.write(data)
     print(f"wrote {args.out}: {len(data)} bytes, {used} tiles, "

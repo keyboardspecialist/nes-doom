@@ -11,7 +11,11 @@
 
 .import nmi_handler, irq_handler, bg_palettes
 .ifdef E1M1
-.import hud_nt, hud_ex, sec_pal, weapon_oam
+    .import hud_nt, hud_ex, sec_pal, sprite_palettes
+    .import init_oam_set
+    .import thing_x_lo, thing_x_hi, thing_y_lo, thing_y_hi, thing_kind
+    .import monster_thing_idx, monster_spawn_ss
+    .import MAP_THING_COUNT, MONSTER_COUNT
 .endif
 .ifndef M2DEMO
 .import render_frame, init_camera
@@ -31,6 +35,7 @@ reset:
     stx $2000           ; NMI off
     stx $2001           ; rendering off
     stx $4010           ; DMC IRQ off
+    stx $4015           ; all APU channels off while they are configured
 
     bit $2002
 @vwait1:
@@ -58,6 +63,8 @@ reset:
 
     lda #$C5
     sta zp_canary
+    lda #$A5            ; deterministic nonzero combat RNG seed
+    sta rng
 
 @vwait2:
     bit $2002
@@ -118,25 +125,130 @@ reset:
     ldx m2_ptr+1
     cpx #$6A
     bne @clrbuf
+.ifdef E1M1
+    ; Persistent gameplay state occupies the otherwise unused $6A page.
+    ldx #<(MAX_THINGS / 8 - 1)
+    lda #$FF
+@activate_things:
+    sta THING_ACTIVE,x
+    dex
+    bpl @activate_things ; unused tail bits are harmless
+    lda #50
+    sta PL_AMMO
+    lda #100
+    sta PL_HEALTH
+    lda #0
+    sta PL_ARMOR
+    sta PL_ARMOR_TYPE
+    sta HUD_DIRTY       ; generated HUD already shows 50 / 100% / 0%
+    sta WEAPON_FRAME
+    sta WEAPON_TIMER
+    sta SHOT_COUNT
+    sta PICKUP_COUNT
+    sta SHOT_SEEN
+    sta SHOT_PENDING
+    sta SHOT_TARGET
+    sta SHOT_BEST_LO
+    sta SHOT_BEST_HI
+    sta HIT_COUNT
+    sta BARREL_KILLS
+    sta EXPLOSION_SOUND_PENDING
+    sta BUFA_EXPLOSION_SOUND
+    sta BUFA_EXPLOSION_SOUND+1
+    sta EXPLOSION_RENDER_COUNT
+    sta ENEMY_SOUND_PENDING
+    sta ZOMBIE_KILLS
+    sta ENEMY_ATTACKS
+    sta ENEMY_HITS
+    sta EXPLOSION_OAM_COUNT
+.ifdef FULL_E1M1
+    sta FULL_SEG1_SEEN
+    sta FULL_HIGH_VERTEX_SEEN
+.endif
+    ldx #7
+@clear_exp_sound_bits:
+    sta THING_EXP_SOUND_SENT,x
+    dex
+    bpl @clear_exp_sound_bits
+    ldx #<(MAX_THINGS - 1)
+    lda #0
+@clear_thing_combat:
+    sta THING_HEALTH,x
+    sta THING_DEATH_AT,x
+    dex
+    bpl @clear_thing_combat
+    ldx #0
+@init_thing_health:
+    cpx #<MAP_THING_COUNT
+    bcs @thing_health_done
+    lda thing_kind,x
+    cmp #3
+    beq @thing_has_health
+    cmp #4
+    bne :+
+@thing_has_health:
+    lda #20
+    sta THING_HEALTH,x
+:   inx
+    bne @init_thing_health
+@thing_health_done:
+    ldx #0
+@init_monsters:
+    cpx #<MONSTER_COUNT
+    bcs @monsters_done
+    ldy monster_thing_idx,x
+    lda thing_x_lo,y
+    sta MONSTER_X_LO,x
+    lda thing_x_hi,y
+    sta MONSTER_X_HI,x
+    lda thing_y_lo,y
+    sta MONSTER_Y_LO,x
+    lda thing_y_hi,y
+    sta MONSTER_Y_HI,x
+    lda monster_spawn_ss,x
+    sta MONSTER_SS,x
+    lda #0
+    sta MONSTER_LAST_MOVE,x
+    sta MONSTER_LAST_ATTACK,x
+    inx
+    bne @init_monsters
+@monsters_done:
+.endif
 .endif
     mmc5_exram_attr_mode
 
     jsr ppu_init
 
 .ifdef E1M1
-    ; Static weapon OAM.  The rest of the page was initialized to $FF above,
-    ; so all unused sprite records remain hidden.
-    ldx #0
-@weapon_oam:
-    lda weapon_oam,x
-    sta $0200,x
-    inx
-    cpx #144
-    bne @weapon_oam
+    ; Seed every weapon-frame page in the two compose-owned sets and the
+    ; initial stable display set.
+    lda #>OAMA
+    jsr init_oam_set
+    lda #>OAMB
+    jsr init_oam_set
+    lda #>OAMC
+    jsr init_oam_set
+    lda #>OAMA
+    sta BUFA_OAM_SET
+    lda #>OAMB
+    sta BUFA_OAM_SET+1
+    lda #>OAMC
+    sta oam_dma_set
     lda #0
     sta $2003
-    lda #$02
+    lda oam_dma_set
+    clc
+    adc WEAPON_FRAME
     sta $4014           ; prime the first frame; NMI refreshes OAM thereafter
+
+    ; A short noise report is triggered for each shot. Frame IRQs and DMC
+    ; remain disabled; the length counter silences the report automatically.
+    lda #$1B
+    sta $400C
+    lda #$04
+    sta $400E
+    lda #$08
+    sta $4015
 .endif
 
     ; rendering on
@@ -147,7 +259,11 @@ reset:
 .endif
     sta ppu2001_sh
     sta $2001
-    lda #%10001000      ; NMI on, 8x8 sprites at $1000, BG $0000, VRAM inc +1
+.ifdef E1M1
+    lda #%10101000      ; NMI on, MMC5-independent 8x16 sprites, VRAM inc +1
+.else
+    lda #%10001000      ; NMI on, BG $0000, VRAM inc +1
+.endif
     sta ppu2000_sh
     sta $2000
 
@@ -207,7 +323,6 @@ mmc5_init:
     sta MMC5_FILL_TILE
     sta MMC5_FILL_ATTR
     sta MMC5_RAM_BANK
-    sta MMC5_CHR_HI
     sta MMC5_SPLIT_CTRL
     ; PRG windows: bit7 = ROM
     lda #$80
@@ -219,23 +334,28 @@ mmc5_init:
     sta MMC5_PRG_C000   ; CODE
     lda #$0F
     sta MMC5_PRG_E000   ; FIXED (already there at power-on; be explicit)
-    ; sprite CHR banks 0-7 (1KB mode)
+.ifdef E1M1
+    ; Pages 256-261 hold the static world atlas; 262-263 are weapon frame 0.
+    ; NMI changes only the final pair as the weapon animates.
+    lda #>SPRITE_CHR_PAGE
+    sta MMC5_CHR_HI
     ldx #7
 @sprbanks:
     txa
     sta MMC5_CHR_SPR0,x
     dex
     bpl @sprbanks
-.ifdef E1M1
-    ; 8x8 sprites use pattern table $1000: map its four 1KB pages to bank 63.
-    lda #WEAPON_BANK * 4
-    sta MMC5_CHR_SPR0+4
-    lda #WEAPON_BANK * 4 + 1
-    sta MMC5_CHR_SPR0+5
-    lda #WEAPON_BANK * 4 + 2
-    sta MMC5_CHR_SPR0+6
-    lda #WEAPON_BANK * 4 + 3
-    sta MMC5_CHR_SPR0+7
+    lda #0
+    sta MMC5_CHR_HI
+.else
+    lda #0
+    sta MMC5_CHR_HI
+    ldx #7
+@sprbanks:
+    txa
+    sta MMC5_CHR_SPR0,x
+    dex
+    bpl @sprbanks
 .endif
     rts
 
@@ -341,7 +461,7 @@ ppu_init:
     lda #$00
     sta $2006
     ; BG palettes come from the generated texture data (tilegen derives the
-    ; ramp from the actual texture colors); sprite palettes are static
+    ; ramp from the actual texture colors).
     ldx #0
 @pal:
     lda bg_palettes,x
@@ -351,7 +471,11 @@ ppu_init:
     bne @pal
     ldx #0
 @spal:
+.ifdef E1M1
+    lda sprite_palettes,x
+.else
     lda palette_spr,x
+.endif
     sta $2007
     inx
     cpx #16

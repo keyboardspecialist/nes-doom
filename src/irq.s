@@ -85,6 +85,8 @@ irq_handler:
     inx
     cpx #16
     bne @hp
+    lda #HUD_CHR_WINDOW
+    sta MMC5_CHR_HI      ; ExAttr bank 61 now selects physical HUD bank 125
     ; mid-frame scroll re-establish: v = fineY 2, coarse Y 20 -> $2280
     bit $2002
     lda #$22
@@ -126,7 +128,7 @@ irq_handler:
     ; IRQ is raised at PPU dot ~4; with service latency + entry we are ~30 CPU
     ; cycles in. Spin out most of the rest of line 199 so the blank lands near
     ; the 199/200 boundary (glitch confined to the letterbox seam).
-    ldx #12
+    ldx #11
 @spin:
     dex
     bne @spin

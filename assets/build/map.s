@@ -2,6 +2,9 @@
 .export map_verts, map_segs, map_nodes
 .export ss_first_lo, ss_first_hi, ss_count, ss_sector
 .export ss_bx1, ss_by1, ss_bx2, ss_by2
+.export ss_thing_first, ss_thing_count
+.export thing_x_lo, thing_x_hi, thing_y_lo, thing_y_hi, thing_kind
+.export monster_thing_idx, monster_spawn_ss
 .export sec_floor, sec_ceil, sec_light
 .export MAP_ROOT_NODE : absolute
 MAP_ROOT_NODE = 0
@@ -13,6 +16,10 @@ PLAYER_PY = 2048
 PLAYER_ANG = 0
 .export EYE_REL : absolute
 EYE_REL = 41
+.export MAP_THING_COUNT : absolute
+MAP_THING_COUNT = 0
+.export MONSTER_COUNT : absolute
+MONSTER_COUNT = 0
 .export REJECT_ROWB : absolute
 REJECT_ROWB = 1
 .export PX_MIN_H : absolute
@@ -71,6 +78,24 @@ ss_bx2:
     .byte $30, $24, $1C, $0E, $12, $1C
 ss_by2:
     .byte $14, $0E, $14, $0E, $0A, $0E
+ss_thing_first:
+    .byte $00, $00, $00, $00, $00, $00
+ss_thing_count:
+    .byte $00, $00, $00, $00, $00, $00
+thing_x_lo:
+    ; empty
+thing_x_hi:
+    ; empty
+thing_y_lo:
+    ; empty
+thing_y_hi:
+    ; empty
+thing_kind:
+    ; empty
+monster_thing_idx:
+    ; empty
+monster_spawn_ss:
+    ; empty
 sec_floor:
     .byte $00, $00, $10
 sec_ceil:

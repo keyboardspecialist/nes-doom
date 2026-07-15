@@ -2,6 +2,8 @@
 .segment "CHRDATA"
 .ifdef M2DEMO
 .incbin "assets/build/chr-test.bin"
+.elseif .defined(FULL_E1M1)
+.incbin "assets/build/chr-e1m1-full.bin"
 .elseif .defined(E1M1)
 .incbin "assets/build/chr-e1m1.bin"
 .else
