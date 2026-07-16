@@ -46,9 +46,10 @@
 .import barrel_exp_dx, barrel_exp_dy, barrel_exp_tile, barrel_exp_attr
 .import monster_thing_idx, MONSTER_COUNT
 .import update_enemies
-.import init_doors, update_doors, try_use
+.import init_doors, update_doors, try_use, check_walk_special
 .endif
 .export render_frame, init_camera, do_seg, fetch_vertex, sub_cam, zdot, xdot
+.export move_blocked, move_leaf, move_radius
 .ifdef E1M1
 .export draw_subsector_things, init_oam_set
 .endif
@@ -74,6 +75,7 @@ move_y1:    .res 2
 move_cross: .res 4
 move_leaf:  .res 1
 move_pass:  .res 1
+move_radius: .res 2
 .ifdef E1M1
 spr_scan_count:  .res 160    ; exact software enforcement of the PPU limit
 spr_floor:       .res 1
@@ -140,8 +142,17 @@ render_frame:
 .ifdef E1M1
     jsr update_doors
 .endif
+    lda px
+    sta PLAYER_PREV_X
+    lda px+1
+    sta PLAYER_PREV_X+1
+    lda py
+    sta PLAYER_PREV_Y
+    lda py+1
+    sta PLAYER_PREV_Y+1
     jsr update_cam
 .ifdef E1M1
+    jsr check_walk_special
     jsr try_use
 .endif
 .ifdef E1M1
@@ -166,7 +177,11 @@ render_frame:
 .endif
     jsr find_sector     ; -> cam_sec; eye follows the camera's sector floor
     ldx cam_sec
+.ifdef E1M1
+    lda SECTOR_FLOOR_RT,x
+.else
     lda sec_floor,x
+.endif
     clc
     adc #<EYE_REL
     sta eye_h
@@ -403,6 +418,10 @@ move_two_steps:
     rts
 
 try_move_axes:
+    lda #<PLAYER_RADIUS
+    sta move_radius
+    lda #>PLAYER_RADIUS
+    sta move_radius+1
     lda move_dx
     ora move_dx+1
     beq @try_y
@@ -682,9 +701,9 @@ collision_seg:
     lda rt_acc+1
     adc tptr+1
     sta mul_a+1
-    lda #<PLAYER_RADIUS
+    lda move_radius
     sta mul_b
-    lda #>PLAYER_RADIUS
+    lda move_radius+1
     sta mul_b+1
     jsr mul16u
     ldx #3
@@ -727,10 +746,10 @@ axis_near:
 @ordered:
     lda mul_b
     sec
-    sbc #<PLAYER_RADIUS
+    sbc move_radius
     sta tptr
     lda mul_b+1
-    sbc #>PLAYER_RADIUS
+    sbc move_radius+1
     sta tptr+1
     bcs :+
     lda #0
@@ -745,10 +764,10 @@ axis_near:
     bcc @outside
 :   lda rt_acc
     clc
-    adc #<PLAYER_RADIUS
+    adc move_radius
     sta tptr
     lda rt_acc+1
-    adc #>PLAYER_RADIUS
+    adc move_radius+1
     sta tptr+1
     bcc :+
     lda #$FF
@@ -1073,6 +1092,7 @@ init_oam_set:
 ; Collect pickups after movement so gameplay state and the following render
 ; pass observe the same camera position. Distances are s11.4: a 16-unit radius
 ; has squared radius 65536, represented by carry from the 16-bit square sum.
+.segment "FIXED"
 collect_pickups:
     ldx #0
 @thing:
@@ -1088,6 +1108,12 @@ collect_pickups:
     ldy spr_thing
     lda thing_kind,y
     cmp #3
+    bcc :+
+    cmp #5
+    bcs :+
+    jmp @next
+:
+    cmp #13
     bcc :+
     jmp @next
 :
@@ -1153,34 +1179,129 @@ collect_pickups:
     adc rt_acc
     lda MMC5_MULT_B
     adc rt_acc+1
-    bcs @next
+    bcc :+
+    jmp @next
+:
 
     ldy spr_thing
     lda thing_kind,y
-    beq @health
+    bne :+
+    jmp @health
+:
     cmp #1
-    beq @bonus_armor
+    bne :+
+    jmp @bonus_armor
+:
+    cmp #2
+    beq @blue_armor_pickup
+    cmp #5
+    beq @stimpack
+    cmp #6
+    beq @medikit
+    cmp #7
+    beq @green_armor
+    cmp #8
+    beq @clip
+    cmp #9
+    beq @bullet_box
+    cmp #10
+    beq @shells
+    cmp #11
+    beq @shell_box
+    ; Shotgun is represented as a useful shell/ammo pickup until weapon
+    ; switching exists.
+    lda #20
+    bne @add_ammo
+@blue_armor_pickup:
     ; ARM2 is left in the world when it cannot improve armor.
     lda PL_ARMOR
     cmp #200
-    bcs @next
+    bcc :+
+    jmp @next
+:
     lda #200
     sta PL_ARMOR
     lda #2
     sta PL_ARMOR_TYPE
+    jmp @consume
+@stimpack:
+    lda PL_HEALTH
+    cmp #100
+    bcc :+
+    jmp @next
+:
+    lda #10
+    bne @add_health
+@medikit:
+    lda PL_HEALTH
+    cmp #100
+    bcc :+
+    jmp @next
+:
+    lda #25
+@add_health:
+    clc
+    adc PL_HEALTH
+    bcc :+
+    lda #100
+:   cmp #101
+    bcc :+
+    lda #100
+:   sta PL_HEALTH
+    jmp @consume
+@green_armor:
+    lda PL_ARMOR
+    cmp #100
+    bcc :+
+    jmp @next
+:
+    lda #100
+    sta PL_ARMOR
+    lda #1
+    sta PL_ARMOR_TYPE
     bne @consume
+@clip:
+    lda #10
+    bne @add_ammo
+@bullet_box:
+    lda #50
+    bne @add_ammo
+@shells:
+    lda #8
+    bne @add_ammo
+@shell_box:
+    lda #20
+@add_ammo:
+    ldx PL_AMMO
+    cpx #200
+    bcc :+
+    jmp @next
+:
+    clc
+    adc PL_AMMO
+    bcc :+
+    lda #200
+:   cmp #201
+    bcc :+
+    lda #200
+:   sta PL_AMMO
+    jmp @consume
 @health:
     lda PL_HEALTH
     cmp #200
-    bcs @consume
+    bcc :+
+    jmp @next
+:
     inc PL_HEALTH
     bne @consume
 @bonus_armor:
     lda PL_ARMOR
     cmp #200
-    bcs :+
+    bcc :+
+    jmp @next
+:
     inc PL_ARMOR
-:   lda PL_ARMOR_TYPE
+    lda PL_ARMOR_TYPE
     bne @consume
     lda #1
     sta PL_ARMOR_TYPE
@@ -1202,6 +1323,8 @@ collect_pickups:
     lda #1
     sta HUD_DIRTY
     inc PICKUP_COUNT
+    lda #1
+    sta PICKUP_SOUND_PENDING
 @next:
     ldx spr_thing
     inx
@@ -1230,6 +1353,7 @@ pickup_bits:
 
 ; Expiration is simulation state, not visibility state. Scan every render so
 ; offscreen death animations cannot wrap their byte-sized ages and replay.
+.segment "CODE"
 expire_explosions:
     ldx #0
 @thing:
@@ -1243,6 +1367,8 @@ expire_explosions:
     cmp #3
     beq @dead_kind
     cmp #4
+    beq @dead_kind
+    cmp #13
     bne @next
 @dead_kind:
     sta spr_frame
@@ -1324,7 +1450,11 @@ draw_subsector_things:       ; X = subsector
     stx spr_current_ss
     lda ss_sector,x
     tax
+.ifdef E1M1
+    lda SECTOR_FLOOR_RT,x
+.else
     lda sec_floor,x
+.endif
     sta spr_floor
     ldx spr_current_ss
     lda ss_thing_count,x
@@ -1338,6 +1468,8 @@ draw_subsector_things:       ; X = subsector
     ldy spr_thing
     lda thing_kind,y
     cmp #4
+    beq @static_next
+    cmp #13
     beq @static_next
     jsr project_world_thing
 @static_next:
@@ -1371,7 +1503,10 @@ project_world_thing:
     ldy spr_thing
     lda thing_kind,y
     cmp #4
+    beq @monster_position
+    cmp #13
     bne @static_position
+@monster_position:
     ldx spr_monster
     lda MONSTER_X_LO,x
     sta wx
@@ -1508,6 +1643,8 @@ project_world_thing:
     cmp #3
     beq @barrel
     cmp #4
+    beq @zombie
+    cmp #13
     beq @zombie
     jmp @normal_sprite
 @barrel:
@@ -1688,11 +1825,15 @@ consider_shot_candidate:
     beq @shootable
     cmp #4
     beq @shootable
+    cmp #13
+    beq @shootable
     rts
 @shootable:
     sta spr_frame
     lda THING_HEALTH,y
-    beq @out
+    bne :+
+    jmp @out
+:
     lda ttz+1
     cmp #$33
     bcc @range_ok
@@ -1703,6 +1844,8 @@ consider_shot_candidate:
 @range_ok:
     lda spr_frame
     cmp #4
+    beq @zombie_lateral
+    cmp #13
     beq @zombie_lateral
     lda ttx+1
     beq @lateral_positive
@@ -3150,7 +3293,11 @@ do_seg:
     sta seg_hc
     lda eye_h
     sec
+.ifdef E1M1
+    sbc SECTOR_FLOOR_RT,x
+.else
     sbc sec_floor,x
+.endif
     sta seg_hf
     lda sec_light,x
     sta seg_light
@@ -3174,7 +3321,11 @@ do_seg:
     sta seg_bhc
     lda eye_h
     sec
+.ifdef E1M1
+    sbc SECTOR_FLOOR_RT,y
+.else
     sbc sec_floor,y
+.endif
     sta seg_bhf
     ldx #1
 :   stx two_sided

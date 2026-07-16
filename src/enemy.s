@@ -8,7 +8,7 @@
 .export update_enemies
 
 .ifdef E1M1
-.import find_subsector
+.import find_subsector, move_blocked, move_leaf, move_radius
 .import monster_thing_idx, MONSTER_COUNT
 
 .segment "BSS"
@@ -17,6 +17,9 @@ enemy_thing:   .res 1
 enemy_dx:      .res 2
 enemy_dy:      .res 2
 enemy_damage:  .res 1
+enemy_sight_x: .res 2
+enemy_sight_y: .res 2
+enemy_sight_n: .res 1
 
 .segment "FIXED"
 
@@ -69,6 +72,10 @@ update_enemies:
     jmp @next
 :
     jsr enemy_in_range
+    bcc :+
+    jmp @next
+:
+    jsr enemy_has_los
     bcc :+
     jmp @next
 :
@@ -132,6 +139,7 @@ update_enemies:
 @damaged:
     lda #1
     sta HUD_DIRTY
+    sta PLAYER_PAIN_SOUND_PENDING
     inc ENEMY_HITS
 
 @next:
@@ -292,6 +300,99 @@ enemy_in_range:
     rts
 @far:
     sec
+    rts
+
+; Trace sixteen collision-tested substeps from the monster to the player.
+; The attack range bounds each step to eight converted world units, so a
+; one-sided wall or non-passable dynamic door cannot be skipped.
+enemy_has_los:
+    lda px
+    sta enemy_sight_x
+    lda px+1
+    sta enemy_sight_x+1
+    lda py
+    sta enemy_sight_y
+    lda py+1
+    sta enemy_sight_y+1
+    ldx enemy_slot
+    lda enemy_sight_x
+    sec
+    sbc MONSTER_X_LO,x
+    sta enemy_dx
+    lda enemy_sight_x+1
+    sbc MONSTER_X_HI,x
+    sta enemy_dx+1
+    lda enemy_sight_y
+    sec
+    sbc MONSTER_Y_LO,x
+    sta enemy_dy
+    lda enemy_sight_y+1
+    sbc MONSTER_Y_HI,x
+    sta enemy_dy+1
+    .repeat 4
+    lda enemy_dx+1
+    cmp #$80
+    ror enemy_dx+1
+    ror enemy_dx
+    lda enemy_dy+1
+    cmp #$80
+    ror enemy_dy+1
+    ror enemy_dy
+    .endrepeat
+    lda MONSTER_X_LO,x
+    sta px
+    lda MONSTER_X_HI,x
+    sta px+1
+    lda MONSTER_Y_LO,x
+    sta py
+    lda MONSTER_Y_HI,x
+    sta py+1
+    lda #16
+    sta enemy_sight_n
+    lda #32             ; point-like ray tolerance, smaller than player radius
+    sta move_radius
+    lda #0
+    sta move_radius+1
+@sight_step:
+    jsr find_subsector
+    stx move_leaf
+    lda px
+    clc
+    adc enemy_dx
+    sta px
+    lda px+1
+    adc enemy_dx+1
+    sta px+1
+    lda py
+    clc
+    adc enemy_dy
+    sta py
+    lda py+1
+    adc enemy_dy+1
+    sta py+1
+    jsr move_blocked
+    bcs @sight_blocked
+    dec enemy_sight_n
+    bne @sight_step
+    clc
+    bcc @sight_restore
+@sight_blocked:
+    sec
+@sight_restore:
+    php
+    lda enemy_sight_x
+    sta px
+    lda enemy_sight_x+1
+    sta px+1
+    lda enemy_sight_y
+    sta py
+    lda enemy_sight_y+1
+    sta py+1
+.ifdef FULL_E1M1
+    lda #MAP_COMMON_BANK
+    sta MMC5_PRG_A000
+.endif
+    plp
     rts
 
 advance_enemy_rng:

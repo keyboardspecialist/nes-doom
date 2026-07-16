@@ -8,6 +8,10 @@
 .export sec_floor, sec_ceil, sec_light
 .export door_sector, door_closed, door_open
 .export door_use_x_lo, door_use_x_hi, door_use_y_lo, door_use_y_hi, door_use_id
+.export lift_sector, lift_high, lift_low
+.export lift_x1_lo, lift_x1_hi, lift_y1_lo, lift_y1_hi
+.export lift_x2_lo, lift_x2_hi, lift_y2_lo, lift_y2_hi
+.export exit_use_x_lo, exit_use_x_hi, exit_use_y_lo, exit_use_y_hi
 .export MAP_ROOT_NODE : absolute
 MAP_ROOT_NODE = 75
 .export PLAYER_PX : absolute
@@ -28,6 +32,10 @@ MAP_SECTOR_COUNT = 26
 DOOR_COUNT = 1
 .export DOOR_USE_COUNT : absolute
 DOOR_USE_COUNT = 2
+.export LIFT_COUNT : absolute
+LIFT_COUNT = 0
+.export EXIT_USE_COUNT : absolute
+EXIT_USE_COUNT = 0
 .export REJECT_ROWB : absolute
 REJECT_ROWB = 4
 .export PX_MIN_H : absolute
@@ -418,6 +426,36 @@ door_use_y_hi:
     .byte $3F, $3F
 door_use_id:
     .byte $00, $00
+lift_sector:
+    ; empty
+lift_high:
+    ; empty
+lift_low:
+    ; empty
+lift_x1_lo:
+    ; empty
+lift_x1_hi:
+    ; empty
+lift_y1_lo:
+    ; empty
+lift_y1_hi:
+    ; empty
+lift_x2_lo:
+    ; empty
+lift_x2_hi:
+    ; empty
+lift_y2_lo:
+    ; empty
+lift_y2_hi:
+    ; empty
+exit_use_x_lo:
+    ; empty
+exit_use_x_hi:
+    ; empty
+exit_use_y_lo:
+    ; empty
+exit_use_y_hi:
+    ; empty
 reject_tbl:
     .byte $30, $43, $00, $00, $00, $02, $00, $00, $30, $03, $10, $00, $00, $00, $00, $00
     .byte $05, $00, $00, $00, $05, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00

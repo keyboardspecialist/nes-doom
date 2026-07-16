@@ -23,6 +23,13 @@ FACE_TIMER = $6A12
 FACE_HIT_SEEN = $6A13
 FACE_IDLE_TIMER = $6A14
 FACE_IDLE_PHASE = $6A15
+LEVEL_COMPLETE = $6A16
+PICKUP_SOUND_PENDING = $6A17
+PLAYER_PAIN_SOUND_PENDING = $6A18
+DOOR_SOUND_PENDING = $6A19
+EXIT_SOUND_PENDING = $6A1A
+PLAYER_PREV_X = $6A1B
+PLAYER_PREV_Y = $6A1D
 HUD_DIRTY = $6A28
 WEAPON_FRAME = $6A29
 WEAPON_TIMER = $6A2A
@@ -64,6 +71,7 @@ OAMB = $6F00
 OAMC = $7300
 ; Dynamic map state. Door ceilings are indexed directly by sector byte.
 SECTOR_CEIL_RT = $7700      ; 256-byte mutable ceiling shadow
+SECTOR_FLOOR_RT = $7900     ; 256-byte mutable floor shadow
 DOOR_POS = $7800            ; 8 bytes: rise above closed ceiling
 DOOR_STATE = $7808          ; 0 closed, 1 opening, 2 waiting, 3 closing
 DOOR_PHASE = $7810          ; half-speed fractional accumulator
@@ -75,6 +83,11 @@ DOOR_BEST_ID = $782A
 DOOR_BEST_LO = $782B
 DOOR_BEST_HI = $782C
 DOOR_USE_INDEX = $782D
+LIFT_STATE = $782E          ; 0 top, 1 lowering, 2 waiting, 3 raising
+LIFT_POS = $782F            ; distance below the high floor
+LIFT_PHASE = $7830          ; quarter-speed fractional accumulator
+LIFT_WAIT = $7831
+LIFT_LAST_FRAME = $7832
 
 ; Pusher code banks (PRG02/PRG03 mapped at $8000 via $5114; bit7 = ROM)
 PUSH_BANK_A = $82
@@ -147,8 +160,8 @@ AUDIO_M0_HI = $7F0D
 AUDIO_M1_HI = $7F0E
 AUDIO_DESIRED_HI = $7F0F
 MUSIC_EVENT_COUNT = $7F10
-DPCM_TRIGGER_COUNT = $7F11
-DPCM_HOLD = $7F12
+EMPTY_SOUND_PENDING = $7F11
+NOISE_OWNER = $7F12
 .else
 FLAT_BANK = 12      ; 2 synthetic textures, 6 banks each
 .endif

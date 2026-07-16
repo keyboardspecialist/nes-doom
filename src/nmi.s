@@ -235,7 +235,11 @@ update_weapon:
     and #$01            ; A fires; held A repeats after recovery
     beq @done
     lda PL_AMMO
-    beq @done
+    bne :+
+    lda #1
+    sta EMPTY_SOUND_PENDING
+    rts
+:
     dec PL_AMMO
     inc SHOT_COUNT
     lda #1

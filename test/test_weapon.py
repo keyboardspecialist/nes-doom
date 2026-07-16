@@ -124,9 +124,12 @@ class SpriteTest(unittest.TestCase):
         self.assertEqual([sprite_tile_byte(p) for p in (0, 1, 127, 128, 255)],
                          [0, 2, 254, 1, 255])
         patterns, meta = self.patterns, self.meta
-        self.assertEqual(meta["world_kind_meta_base"], [0, 6, 18, 21, 27])
-        self.assertEqual(meta["world_kind_frame_mask"], [1, 3, 0, 1, 7])
-        self.assertEqual(meta["world_kind_world_h"], [7, 6, 7, 13, 22])
+        self.assertEqual(meta["world_kind_meta_base"],
+                         [0, 6, 18, 21, 27, 0, 0, 18, 6, 6, 6, 6, 6, 27])
+        self.assertEqual(meta["world_kind_frame_mask"],
+                         [1, 3, 0, 1, 7, 1, 1, 0, 3, 3, 3, 3, 3, 7])
+        self.assertEqual(meta["world_kind_world_h"],
+                         [7, 6, 7, 13, 22, 7, 7, 7, 6, 6, 6, 6, 6, 22])
         self.assertEqual(len(meta["world_meta_first"]), 51)
         self.assertEqual(len(meta["world_meta_count"]), 51)
 
@@ -143,8 +146,8 @@ class SpriteTest(unittest.TestCase):
         self.assertTrue(all(meta["world_meta_count"]))
 
         expected_attrs = [1, 2, 3, 0, 0]
-        for kind, base in enumerate(meta["world_kind_meta_base"]):
-            end = (meta["world_kind_meta_base"] + [51])[kind + 1]
+        for kind, base in enumerate(meta["world_kind_meta_base"][:5]):
+            end = (meta["world_kind_meta_base"][:5] + [51])[kind + 1]
             colors = set()
             for index in range(base, end):
                 first = meta["world_meta_first"][index]

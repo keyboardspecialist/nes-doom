@@ -123,13 +123,15 @@ the ROM is NES 2.0-legal but real hardware means a custom board.
   parse/rescale WAD lumps and split segs on partition lines (mechanical, but
   unwritten). Doom-scale coordinates must rescale into s11.4 (±2047 units).
 - Full E1M1 is available as `make e1m1-full`: 533 converted vertices, 816
-  split segs, 237 subsectors, 236 nodes, 85 sectors, and 48 supported things
-  including four zombiemen.
+  split segs, 237 subsectors, 236 nodes, 85 sectors, and all 64 medium-skill
+  gameplay things, including four zombiemen and two imps. New item/imp kinds
+  currently use explicit aliases in the six-page world sprite atlas.
   Two `$A000` banks hold 12-byte staged seg records, one holds vertices/nodes,
   and the common bank holds subsector/sector/REJECT/thing data. Vertex endpoint
   indices are 16-bit; indices above 255 use the uncached angle path. Sector
   palettes moved to fixed ROM so NMI is independent of the selected map bank.
-  Node/subsector byte indices still fit E1M1.
+  Node/subsector byte indices still fit E1M1. Linedef specials drive the map's
+  repeatable lift and exit switch, and NUKAGE sectors install green floor ramps.
 - Sprite CHR uses six static 1KB world pages plus a two-page active weapon
   frame selected in NMI. Close living zombiemen and their first death frame
   use 32px bakes; fallen frames remain 16px. The line-160 HUD IRQ selects
@@ -541,9 +543,9 @@ seam, ~1-2 slots after pruning) and dithered floor-shade tiles (cheap).
 
 The WAD build compiles `D_E1M1` from MUS timing into bounded 60 Hz hardware
 commands. Its two polyphonic guitar tracks use the two base and two MMC5 pulse
-channels, bass uses triangle, and percussion combines noise with short DPCM
-kick/snare/tom samples. The complete 96-second loop, period/volume tables, and
-percussion recipes occupy 8,016 bytes in PRG08. Runtime playback performs no
+channels, bass uses triangle, and all percussion uses short long-LFSR noise
+hits. The complete 96-second loop, period/volume tables, and percussion recipes
+occupy 7,985 bytes in PRG08. Runtime playback performs no
 voice allocation or pitch math and processes at most six channel updates per
 frame. Gameplay noise effects retain priority without interrupting tonal music.
 

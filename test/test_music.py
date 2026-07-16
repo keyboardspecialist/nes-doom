@@ -7,7 +7,6 @@ from pathlib import Path
 
 from tools.musicgen import (
     LOOP_FRAMES,
-    build_dpcm_samples,
     compile_score,
     parse_mus,
     tick_to_frame,
@@ -44,7 +43,6 @@ class E1M1MusicTest(unittest.TestCase):
     def setUpClass(cls):
         cls.mus = parse_mus(Wad("Doom1.WAD").lump("D_E1M1"))
         cls.compiled = compile_score(cls.mus)
-        cls.dpcm = build_dpcm_samples()
 
     def test_score_contract(self):
         mus = self.mus
@@ -62,12 +60,16 @@ class E1M1MusicTest(unittest.TestCase):
         compiled = self.compiled
         self.assertEqual(len(compiled["records"]), 2045)
         self.assertEqual(len(compiled["stream"]), 7259)
-        self.assertEqual(compiled["bank_bytes"], 8016)
+        self.assertEqual(compiled["bank_bytes"], 7985)
         self.assertLessEqual(compiled["bank_bytes"], 8192)
         self.assertEqual(max(count for _frame, _data, count in compiled["records"]), 6)
         self.assertEqual({voice: len(states) for voice, states in compiled["tables"].items()},
                          {0: 79, 1: 81, 2: 6, 4: 70, 5: 120})
-        self.assertEqual(len(compiled["recipes"]), 15)
+        self.assertEqual(compiled["recipes"],
+                         [(2, 0x18), (4, 0x48), (4, 0x68), (6, 0x28),
+                          (7, 0x38), (12, 0x38), (15, 0x28)])
+        self.assertTrue(all(period < 0x80 for period, _length
+                            in compiled["recipes"]))
 
         frames = [frame for frame, _data, _count in compiled["records"]]
         gaps = [b - a for a, b in zip(frames, frames[1:])]
@@ -75,30 +77,17 @@ class E1M1MusicTest(unittest.TestCase):
         self.assertTrue(all(1 <= gap <= 255 for gap in gaps))
         self.assertEqual(sum(gaps), LOOP_FRAMES)
 
-    def test_dpcm_layout_and_deterministic_assembly(self):
-        self.assertEqual({name: len(data) for name, data in self.dpcm.items()},
-                         {"kick": 129, "snare": 257, "tom": 193})
-        self.assertTrue(all((len(data) - 1) % 16 == 0
-                            for data in self.dpcm.values()))
-        offsets = []
-        offset = 0
-        for name in ("kick", "snare", "tom"):
-            offset = (offset + 63) & ~63
-            offsets.append(offset)
-            offset += len(self.dpcm[name])
-        self.assertEqual(offsets, [0, 192, 512])
-        self.assertLessEqual(offset, 0x7FA)
-
+    def test_deterministic_noise_only_assembly(self):
         with tempfile.TemporaryDirectory() as directory:
             first = Path(directory) / "first.s"
             second = Path(directory) / "second.s"
-            write_assembly(first, self.compiled, self.dpcm)
-            write_assembly(second, compile_score(self.mus), build_dpcm_samples())
+            write_assembly(first, self.compiled)
+            write_assembly(second, compile_score(self.mus))
             source = first.read_bytes()
             self.assertEqual(source, second.read_bytes())
         self.assertIn(b'.segment "MUSIC0"', source)
-        self.assertIn(b'.segment "DPCM"', source)
-        self.assertIn(b"MUSIC_BANK_BYTES = 8016", source)
+        self.assertNotIn(b'DPCM', source)
+        self.assertIn(b"MUSIC_BANK_BYTES = 7985", source)
 
 
 if __name__ == "__main__":

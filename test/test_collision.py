@@ -32,7 +32,9 @@ class CollisionMetadataTest(unittest.TestCase):
         self.assertEqual(len(full[11]), 8)
         self.assertEqual(sorted(use[2] for use in full[11]), [0, 0, 1, 1, 2, 2, 3, 3])
         self.assertEqual(sum(bool(seg[4] & 0x70) for seg in trimmed[1]), 4)
-        self.assertEqual(sum(bool(seg[4] & 0x70) for seg in full[1]), 16)
+        self.assertEqual(sum(bool(seg[4] & 0x70) for seg in full[1]), 18)
+        self.assertEqual(full[12], [(70, 42, -19, 23552, 12646, 25446, 13722)])
+        self.assertEqual(full[13], [(24576, 1638)])
         self.assertTrue(all((seg[4] & 0x0F) < 16 for seg in full[1]))
 
 

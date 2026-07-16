@@ -13,7 +13,7 @@
 .import music_tri_lo, music_tri_meta
 .import music_mmc5_p1_lo, music_mmc5_p1_meta
 .import music_mmc5_p2_lo, music_mmc5_p2_meta
-.import music_noise_period, music_noise_length, music_noise_dpcm
+.import music_noise_period, music_noise_length
 
 .macro music_read
 .local no_carry
@@ -54,10 +54,6 @@ audio_init:
     sta $4008
     lda #$30
     sta $400C
-    lda #$09            ; DMC IRQ/loop off, 11.2kHz synthesis rate
-    sta $4010
-    lda #$40
-    sta $4011
     lda #$0F            ; base pulses, triangle, and noise enabled
     sta $4015
     lda #$03
@@ -68,10 +64,8 @@ audio_tick:
     lda NOISE_HOLD
     beq :+
     dec NOISE_HOLD
-:
-    lda DPCM_HOLD
-    beq :+
-    dec DPCM_HOLD
+    bne :+
+    sta NOISE_OWNER
 :
     lda MUSIC_DELAY
     beq audio_event
@@ -180,8 +174,134 @@ audio_commands:
 audio_sfx:
     ; Preserve the old same-frame write order so existing sound signatures
     ; remain stable. The last/highest-priority request owns subsequent noise.
+    lda NOISE_HOLD
+    bne :+
+    jmp @normal_sfx
+:
+    lda EXIT_SOUND_PENDING
+    beq @held_explosion
+    lda NOISE_OWNER
+    cmp #8
+    bcs :+
+    jmp @exit
+:
+    lda #0
+    sta EXIT_SOUND_PENDING
+@held_explosion:
+    lda EXPLOSION_SOUND_PENDING
+    beq @held_enemy
+    lda NOISE_OWNER
+    cmp #7
+    bcs :+
+    jmp @explosion
+:
+    lda #0
+    sta EXPLOSION_SOUND_PENDING
+@held_enemy:
+    lda ENEMY_SOUND_PENDING
+    beq @held_pain
+    lda NOISE_OWNER
+    cmp #6
+    bcs :+
+    jmp @enemy
+:
+    lda #0
+    sta ENEMY_SOUND_PENDING
+@held_pain:
+    lda PLAYER_PAIN_SOUND_PENDING
+    beq @held_pistol
+    lda NOISE_OWNER
+    cmp #5
+    bcs :+
+    jmp @pain
+:
+    lda #0
+    sta PLAYER_PAIN_SOUND_PENDING
+@held_pistol:
     lda PISTOL_SOUND_PENDING
-    beq @enemy
+    beq @held_empty
+    lda NOISE_OWNER
+    cmp #4
+    bcs :+
+    jmp @pistol
+:
+    lda #0
+    sta PISTOL_SOUND_PENDING
+@held_empty:
+    lda EMPTY_SOUND_PENDING
+    beq @held_door
+    lda NOISE_OWNER
+    cmp #3
+    bcs :+
+    jmp @empty
+:
+    lda #0
+    sta EMPTY_SOUND_PENDING
+@held_door:
+    lda DOOR_SOUND_PENDING
+    beq @drop_held
+    lda NOISE_OWNER
+    cmp #2
+    bcs @drop_held
+    jmp @door
+@drop_held:
+    lda #0
+    sta PICKUP_SOUND_PENDING
+    sta DOOR_SOUND_PENDING
+    sta EMPTY_SOUND_PENDING
+    sta PISTOL_SOUND_PENDING
+    sta PLAYER_PAIN_SOUND_PENDING
+    sta ENEMY_SOUND_PENDING
+    sta EXPLOSION_SOUND_PENDING
+    rts
+@normal_sfx:
+    lda PICKUP_SOUND_PENDING
+    beq @door
+    lda #0
+    sta PICKUP_SOUND_PENDING
+    lda #$15
+    sta $400C
+    lda #$02
+    sta $400E
+    lda #$10
+    sta $400F
+    lda #2
+    sta NOISE_HOLD
+    lda #1
+    sta NOISE_OWNER
+@door:
+    lda DOOR_SOUND_PENDING
+    beq @empty
+    lda #0
+    sta DOOR_SOUND_PENDING
+    lda #$16
+    sta $400C
+    lda #$0C
+    sta $400E
+    lda #$20
+    sta $400F
+    lda #8
+    sta NOISE_HOLD
+    lda #2
+    sta NOISE_OWNER
+@empty:
+    lda EMPTY_SOUND_PENDING
+    beq @pistol
+    lda #0
+    sta EMPTY_SOUND_PENDING
+    lda #$12
+    sta $400C
+    lda #$01
+    sta $400E
+    lda #$08
+    sta $400F
+    lda #1
+    sta NOISE_HOLD
+    lda #3
+    sta NOISE_OWNER
+@pistol:
+    lda PISTOL_SOUND_PENDING
+    beq @pain
     lda #0
     sta PISTOL_SOUND_PENDING
     lda #$1B
@@ -192,6 +312,23 @@ audio_sfx:
     sta $400F
     lda #2
     sta NOISE_HOLD
+    lda #4
+    sta NOISE_OWNER
+@pain:
+    lda PLAYER_PAIN_SOUND_PENDING
+    beq @enemy
+    lda #0
+    sta PLAYER_PAIN_SOUND_PENDING
+    lda #$1C
+    sta $400C
+    lda #$08
+    sta $400E
+    lda #$28
+    sta $400F
+    lda #12
+    sta NOISE_HOLD
+    lda #5
+    sta NOISE_OWNER
 @enemy:
     lda ENEMY_SOUND_PENDING
     beq @explosion
@@ -205,9 +342,11 @@ audio_sfx:
     sta $400F
     lda #20
     sta NOISE_HOLD
+    lda #6
+    sta NOISE_OWNER
 @explosion:
     lda EXPLOSION_SOUND_PENDING
-    beq @done
+    beq @exit
     lda #0
     sta EXPLOSION_SOUND_PENDING
     lda #$1F
@@ -218,6 +357,23 @@ audio_sfx:
     sta $400F
     lda #40
     sta NOISE_HOLD
+    lda #7
+    sta NOISE_OWNER
+@exit:
+    lda EXIT_SOUND_PENDING
+    beq @done
+    lda #0
+    sta EXIT_SOUND_PENDING
+    lda #$1F
+    sta $400C
+    lda #$03
+    sta $400E
+    lda #$38
+    sta $400F
+    lda #30
+    sta NOISE_HOLD
+    lda #8
+    sta NOISE_OWNER
 @done:
     rts
 
@@ -374,16 +530,16 @@ apply_percussion:
     and #$0F
     sta AUDIO_DESIRED_HI
     tax
-    lda music_noise_dpcm,x
-    beq @noise
-    jsr trigger_dpcm
-@noise:
-    ldx AUDIO_DESIRED_HI
     lda NOISE_HOLD
     bne @out
     lda PISTOL_SOUND_PENDING
     ora ENEMY_SOUND_PENDING
     ora EXPLOSION_SOUND_PENDING
+    ora PICKUP_SOUND_PENDING
+    ora PLAYER_PAIN_SOUND_PENDING
+    ora DOOR_SOUND_PENDING
+    ora EXIT_SOUND_PENDING
+    ora EMPTY_SOUND_PENDING
     bne @out
     lda AUDIO_CMD
     lsr
@@ -399,35 +555,6 @@ apply_percussion:
     sta $400F
 @out:
     rts
-
-trigger_dpcm:
-    ldy DPCM_HOLD
-    beq :+
-    rts                 ; never preempt buffered bits from the prior sample
-:
-    tax
-    dex
-    lda #$0F
-    sta $4015
-    lda #$40            ; every generated sample assumes midpoint DAC level
-    sta $4011
-    lda dpcm_addr,x
-    sta $4012
-    lda dpcm_length,x
-    sta $4013
-    lda #$1F
-    sta $4015
-    lda dpcm_hold_frames,x
-    sta DPCM_HOLD
-    inc DPCM_TRIGGER_COUNT
-    rts
-
-dpcm_addr:
-    .byte $E0, $E3, $E8       ; $F800, $F8C0, $FA00
-dpcm_length:
-    .byte 8, 16, 12           ; 129, 257, 193 bytes
-dpcm_hold_frames:
-    .byte 6, 12, 9            ; ceil(sample duration at DMC rate $09)
 
 .else
 .segment "FIXED"

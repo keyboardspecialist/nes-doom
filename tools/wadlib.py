@@ -55,9 +55,14 @@ def parse_map(wad, mapname):
     m["nodes"] = [struct.unpack_from("<hhhh4h4hHH", lumps["NODES"], i * 28)
                   for i in range(len(lumps["NODES"]) // 28)]
     m["sectors"] = []
+    m["sector_flats"] = []
+    m["sector_specials"] = []
     for i in range(len(lumps["SECTORS"]) // 26):
         f, c, ft, ct, light, spec, tag = struct.unpack_from("<hh8s8shhh", lumps["SECTORS"], i * 26)
         m["sectors"].append((f, c, light))
+        m["sector_flats"].append((ft.rstrip(b"\0").decode(),
+                                  ct.rstrip(b"\0").decode()))
+        m["sector_specials"].append((spec, tag))
     m["things"] = [struct.unpack_from("<hhHHH", lumps["THINGS"], i * 10)
                    for i in range(len(lumps["THINGS"]) // 10)]
     m["reject"] = lumps.get("REJECT", b"")

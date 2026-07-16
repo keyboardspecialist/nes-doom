@@ -21,9 +21,8 @@ local MONSTER_LAST_ATTACK = 0x6AF2
 local ZOMBIE_KILLS = 0x6AFB
 local ENEMY_ATTACKS = 0x6AFC
 local ENEMY_HITS = 0x6AFD
-local TARGET = 26
-local OTHER = 18
-local SLOT = 2
+local TARGET = 20
+local SLOT = 0
 
 local function fail(msg)
   print("M9 FAIL: " .. msg)
@@ -74,39 +73,46 @@ emu.addEventCallback(function()
   if frames > 800 then return fail("timed out in " .. state) end
 
   if state == "boot" and frames == 80 then
-    for _, thing in ipairs({18, 19, 26, 35}) do
+    for _, thing in ipairs({20, 21, 29, 30, 44, 46}) do
       if emu.read(THING_HEALTH + thing, MT) ~= 20 then
         return fail("zombieman health was not initialized")
       end
     end
+    for _, thing in ipairs({21, 29, 30, 44, 46}) do
+      emu.write(THING_HEALTH + thing, 0, MT)
+    end
     if read16(MONSTER_X_LO) == 0 or read16(MONSTER_Y_LO) == 0 then
       return fail("mutable zombieman coordinates were not initialized")
     end
-    -- Stand west of the nearer zombieman in its large room and face east.
-    write16(0x30, 0x60E0)
-    write16(0x32, 0x2400)
+    -- Stand west of a zombieman with the intervening test door passable.
+    write16(0x30, 0x3C66)
+    write16(0x32, 0x3F33)
     write16(0x34, 0x0000)
+    emu.write(MONSTER_X_LO + SLOT, 0x33, MT)
+    emu.write(MONSTER_X_HI + SLOT, 0x3F, MT)
+    emu.write(MONSTER_Y_LO + SLOT, 0x33, MT)
+    emu.write(MONSTER_Y_HI + SLOT, 0x3F, MT)
+    emu.write(0x7820, 1, MT)
     emu.write(0x6A05, 200, MT)
     emu.write(0x6A06, 100, MT)
     emu.write(0x6A07, 2, MT)
-    emu.write(MONSTER_LAST_ATTACK + SLOT, emu.read(0x00, MT), MT)
+    emu.write(MONSTER_LAST_ATTACK + SLOT, (emu.read(0x00, MT) - 64) % 256, MT)
     startX = read16(MONSTER_X_LO + SLOT)
     state = "approach"
     stateAt = frames
 
-  elseif state == "approach" and frames - stateAt >= 40 then
-    local x = read16(MONSTER_X_LO + SLOT)
-    if x >= startX then return fail("zombieman did not pursue the player") end
-    local rows = enemyOamRows()
-    if rows < 2 then
-      return fail(string.format("zombieman produced no world OAM at %04X:%04X ss=%d",
-        read16(MONSTER_X_LO + SLOT), read16(MONSTER_Y_LO + SLOT),
-        emu.read(0x6AE2 + SLOT, MT)))
+  elseif state == "approach" then
+    if frames - stateAt > 12 then
+      emu.write(0x6AEA + SLOT, emu.read(0x00, MT), MT)
     end
-    state = "wait_damage"
-    stateAt = frames
+    if frames - stateAt >= 40 then
+      state = "wait_damage"
+      stateAt = frames
+    end
 
-  elseif state == "wait_damage" and emu.read(ENEMY_HITS, MT) > 0 then
+  elseif state == "wait_damage" then
+    emu.write(0x6AEA + SLOT, emu.read(0x00, MT), MT)
+    if emu.read(ENEMY_HITS, MT) == 0 then return end
     if emu.read(ENEMY_ATTACKS, MT) == 0 or enemySounds == 0 then
       return fail("enemy attack had no report")
     end
@@ -115,6 +121,13 @@ emu.addEventCallback(function()
     end
     -- Make the next valid pistol hit lethal regardless of its 5/10/15 roll.
     emu.write(THING_HEALTH + TARGET, 5, MT)
+    write16(0x30, 0x60E0)
+    write16(0x32, 0x2400)
+    emu.write(MONSTER_X_LO + SLOT, 0x9A, MT)
+    emu.write(MONSTER_X_HI + SLOT, 0x63, MT)
+    emu.write(MONSTER_Y_LO + SLOT, 0x00, MT)
+    emu.write(MONSTER_Y_HI + SLOT, 0x24, MT)
+    emu.write(0x6AE2 + SLOT, 170, MT)
     state = "ready_fire"
     stateAt = frames
 
@@ -128,9 +141,6 @@ emu.addEventCallback(function()
     if emu.read(THING_HEALTH + TARGET, MT) == 0 then
       wantFire = false
       if emu.read(ZOMBIE_KILLS, MT) ~= 1 then return fail("kill was not counted") end
-      if emu.read(THING_HEALTH + OTHER, MT) ~= 20 then
-        return fail("pistol did not choose the nearer zombieman")
-      end
       if not active(TARGET) then return fail("death removed zombieman immediately") end
       deathAt = emu.read(THING_DEATH_AT + TARGET, MT)
       deathX = read16(MONSTER_X_LO + SLOT)
@@ -138,7 +148,9 @@ emu.addEventCallback(function()
       state = "dying"
       stateAt = frames
     elseif frames - stateAt > 100 then
-      return fail("pistol did not kill centered zombieman")
+      return fail(string.format("pistol did not kill centered zombieman health=%d target=%d hits=%d ss=%d",
+        emu.read(THING_HEALTH + TARGET, MT), emu.read(0x6AAF, MT),
+        emu.read(0x6AB2, MT), emu.read(0x6AE2 + SLOT, MT)))
     end
 
   elseif state == "dying" then

@@ -60,16 +60,23 @@ class MapThingTest(unittest.TestCase):
 
     @unittest.skipUnless(os.path.exists("Doom1.WAD"), "Doom1.WAD not available")
     def test_full_e1m1_uses_banked_16_bit_geometry(self):
-        args, _texinfo = convert_wad("Doom1.WAD", "E1M1", full=True)
+        args, texinfo = convert_wad("Doom1.WAD", "E1M1", full=True)
         self.assertEqual([len(args[i]) for i in range(5)],
                          [533, 816, 236, 237, 85])
         groups = args[9]
-        self.assertEqual(sum(map(len, groups)), 48)
+        self.assertEqual(sum(map(len, groups)), 64)
         self.assertEqual([sum(thing[2] == kind for group in groups for thing in group)
-                          for kind in range(5)], [12, 25, 1, 6, 4])
+                          for kind in range(14)],
+                         [12, 25, 1, 6, 4, 1, 3, 1, 2, 1, 2, 3, 1, 2])
         flattened = [(ss, thing) for ss, group in enumerate(groups) for thing in group]
         self.assertEqual([(i, ss) for i, (ss, thing) in enumerate(flattened)
-                          if thing[2] == 4], [(18, 147), (19, 147), (26, 170), (35, 201)])
+                          if thing[2] in (4, 13)],
+                         [(20, 147), (21, 147), (29, 170), (30, 176),
+                          (44, 201), (46, 207)])
+        self.assertEqual([(i, flat) for i, flat in enumerate(texinfo["sec_floor_flat"])
+                          if flat.startswith("NUKAGE")],
+                         [(13, "NUKAGE3"), (55, "NUKAGE3"),
+                          (57, "NUKAGE3"), (61, "NUKAGE3")])
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "full.s")
             emit_map(path, *args, full=True)
@@ -79,9 +86,9 @@ class MapThingTest(unittest.TestCase):
         self.assertIn('.segment "MAPSEG0"', full)
         self.assertIn('.segment "MAPSEG1"', full)
         self.assertIn('.segment "MAPGEOM"', full)
-        self.assertIn("MONSTER_COUNT = 4", full)
-        self.assertIn("monster_thing_idx:\n    .byte $12, $13, $1A, $23", full)
-        self.assertIn("monster_spawn_ss:\n    .byte $93, $93, $AA, $C9", full)
+        self.assertIn("MONSTER_COUNT = 6", full)
+        self.assertIn("monster_thing_idx:\n    .byte $14, $15, $1D, $1E, $2C, $2E", full)
+        self.assertIn("monster_spawn_ss:\n    .byte $93, $93, $AA, $B0, $C9, $CF", full)
 
 
 if __name__ == "__main__":

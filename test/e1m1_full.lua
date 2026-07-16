@@ -23,9 +23,9 @@ emu.addEventCallback(function()
   if done then return end
 
   if frames == 100 then
-    -- Barrel 37 is outside the trimmed map and proves the 48-thing payload
+    -- Barrel 45 is outside the trimmed map and proves the 64-thing payload
     -- was loaded and initialized rather than the 16-thing test subset.
-    if emu.read(0x6A2D + 37, MT) ~= 20 then
+    if emu.read(0x6A2D + 45, MT) ~= 20 then
       return fail("distant full-map things were not initialized")
     end
   elseif frames == 200 then

@@ -43,7 +43,7 @@ def words(v):
 
 def emit_map(path, verts, segs, nodes, subsectors, sectors, root, player,
              eye_rel, reject=None, things=None, doors=None, door_uses=None,
-             full=False):
+              lifts=None, exit_uses=None, full=False):
     vdata = []
     for (x, y) in verts:
         vdata += words(x) + words(y)
@@ -77,7 +77,7 @@ def emit_map(path, verts, segs, nodes, subsectors, sectors, root, player,
         ss_thing_first.append(len(thing_kind))
         ss_thing_count.append(len(group))
         for x, y, kind in group:
-            if kind == 4:
+            if kind in (4, 13):
                 monster_thing_idx.append(len(thing_kind))
                 monster_spawn_ss.append(ss_index)
             thing_x.append(x)
@@ -85,7 +85,9 @@ def emit_map(path, verts, segs, nodes, subsectors, sectors, root, player,
             thing_kind.append(kind)
     doors = doors or []
     door_uses = door_uses or []
-    assert len(doors) <= 7
+    lifts = lifts or []
+    exit_uses = exit_uses or []
+    assert len(doors) + len(lifts) <= 7
     # per-subsector bbox (page bytes) — leaf-level culling is much tighter
     # than the node unions
     ss_bb = []
@@ -115,8 +117,8 @@ def emit_map(path, verts, segs, nodes, subsectors, sectors, root, player,
     total = (len(vdata) + len(sdata) + len(ndata) + 8 * len(subsectors)
              + 3 * len(sectors) + len(rej) + 16 * len(sectors) + 736
              + 2 * len(subsectors) + 5 * len(thing_kind)
-             + 2 * len(monster_thing_idx) + 3 * len(doors)
-             + 5 * len(door_uses)
+              + 2 * len(monster_thing_idx) + 3 * len(doors)
+              + 5 * len(door_uses) + 11 * len(lifts) + 4 * len(exit_uses)
              + sprite_lut_reserve)
     if not full:
         assert total <= 8100, (f"map and sector palettes {total}B overflow "
@@ -158,6 +160,10 @@ def emit_map(path, verts, segs, nodes, subsectors, sectors, root, player,
         f.write(".export sec_floor, sec_ceil, sec_light\n")
         f.write(".export door_sector, door_closed, door_open\n")
         f.write(".export door_use_x_lo, door_use_x_hi, door_use_y_lo, door_use_y_hi, door_use_id\n")
+        f.write(".export lift_sector, lift_high, lift_low\n")
+        f.write(".export lift_x1_lo, lift_x1_hi, lift_y1_lo, lift_y1_hi\n")
+        f.write(".export lift_x2_lo, lift_x2_hi, lift_y2_lo, lift_y2_hi\n")
+        f.write(".export exit_use_x_lo, exit_use_x_hi, exit_use_y_lo, exit_use_y_hi\n")
         for name, val in (("MAP_ROOT_NODE", root),
                           ("PLAYER_PX", int(px) & 0xFFFF),
                           ("PLAYER_PY", int(py) & 0xFFFF),
@@ -166,8 +172,10 @@ def emit_map(path, verts, segs, nodes, subsectors, sectors, root, player,
                           ("MAP_THING_COUNT", len(thing_kind)),
                            ("MONSTER_COUNT", len(monster_thing_idx)),
                            ("MAP_SECTOR_COUNT", len(sectors)),
-                           ("DOOR_COUNT", len(doors)),
-                           ("DOOR_USE_COUNT", len(door_uses)),
+                            ("DOOR_COUNT", len(doors)),
+                            ("DOOR_USE_COUNT", len(door_uses)),
+                            ("LIFT_COUNT", len(lifts)),
+                            ("EXIT_USE_COUNT", len(exit_uses)),
                           ("REJECT_ROWB", rowb),
                           ("PX_MIN_H", pxmin_h), ("PX_MAX_H", pxmax_h),
                           ("PY_MIN_H", pymin_h), ("PY_MAX_H", pymax_h)):
@@ -215,6 +223,21 @@ def emit_map(path, verts, segs, nodes, subsectors, sectors, root, player,
             ("door_use_y_lo", [u[1] & 0xFF for u in door_uses]),
             ("door_use_y_hi", [(u[1] >> 8) & 0xFF for u in door_uses]),
             ("door_use_id", [u[2] for u in door_uses]),
+            ("lift_sector", [v[0] for v in lifts]),
+            ("lift_high", [v[1] for v in lifts]),
+            ("lift_low", [v[2] for v in lifts]),
+            ("lift_x1_lo", [v[3] & 0xFF for v in lifts]),
+            ("lift_x1_hi", [(v[3] >> 8) & 0xFF for v in lifts]),
+            ("lift_y1_lo", [v[4] & 0xFF for v in lifts]),
+            ("lift_y1_hi", [(v[4] >> 8) & 0xFF for v in lifts]),
+            ("lift_x2_lo", [v[5] & 0xFF for v in lifts]),
+            ("lift_x2_hi", [(v[5] >> 8) & 0xFF for v in lifts]),
+            ("lift_y2_lo", [v[6] & 0xFF for v in lifts]),
+            ("lift_y2_hi", [(v[6] >> 8) & 0xFF for v in lifts]),
+            ("exit_use_x_lo", [v[0] & 0xFF for v in exit_uses]),
+            ("exit_use_x_hi", [(v[0] >> 8) & 0xFF for v in exit_uses]),
+            ("exit_use_y_lo", [v[1] & 0xFF for v in exit_uses]),
+            ("exit_use_y_hi", [(v[1] >> 8) & 0xFF for v in exit_uses]),
             ("reject_tbl", list(rej)),
         ):
             f.write(f"{name}:\n{byte_rows(vals)}\n")
@@ -393,6 +416,7 @@ def convert_wad(wadpath, mapname, full=False):
         return {"p1": (x1, y1), "p2": (x2, y2), "ulen": ulen, "u0": u0,
                  "tex": tex, "texl": texl, "front": fs[5], "back": back,
                  "flags": l[2], "rowoff": fs[1], "special": l[3],
+                 "tag": l[4], "linedef": ld,
                  "door_sector": (sides[sl][5]
                                  if l[3] == 1 and sl not in (0xFFFF, -1)
                                  else None)}
@@ -544,6 +568,34 @@ def convert_wad(wadpath, mapname, full=False):
         p1, p2 = wverts[l[0]], wverts[l[1]]
         mx, my = s114((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2)
         door_uses.append((mx, my, door_id_of[sector]))
+
+    lifts = []
+    lift_id_of = {}
+    for l in lines:
+        if l[3] != 88:
+            continue
+        targets = [i for i, (_special, tag) in enumerate(m["sector_specials"])
+                   if tag == l[4] and i in kept]
+        if not targets:
+            continue
+        sector = targets[0]
+        low_raw = min(m["sectors"][n][0] for n in adj.get(sector, ()))
+        p1, p2 = wverts[l[0]], wverts[l[1]]
+        x1, y1 = s114(*p1)
+        x2, y2 = s114(*p2)
+        lift_id_of[sector] = len(doors) + len(lifts)
+        lifts.append((sec_renum[sector], scale_height(m["sectors"][sector][0]),
+                      scale_height(low_raw), x1, y1, x2, y2))
+        break
+
+    exit_uses = []
+    for l in lines:
+        if l[3] != 11 or l[5] in (0xFFFF, -1):
+            continue
+        if sides[l[5]][5] not in kept:
+            continue
+        p1, p2 = wverts[l[0]], wverts[l[1]]
+        exit_uses.append(s114((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2))
 
     verts = []
     vmap = {}
@@ -725,6 +777,11 @@ def convert_wad(wadpath, mapname, full=False):
                     door_id = None
             elif door_id is not None:
                 door_id = None
+            if door_id is None and back is not None and blocked:
+                lift_sector = (s["front"] if s["front"] in lift_id_of else
+                               (back if back in lift_id_of else None))
+                if lift_sector is not None:
+                    door_id = lift_id_of[lift_sector]
             door_bits = 0 if door_id is None else (door_id + 1) << 4
             tex_slot = (slot(s["tex"]) | door_bits |
                         (0x80 if blocked else 0))
@@ -757,7 +814,11 @@ def convert_wad(wadpath, mapname, full=False):
     ppx, ppy = s114(sx, sy)
     pang = round(sang * 65536 / 360) & 0xFFFF
 
-    world_thing_kind = {2014: 0, 2015: 1, 2019: 2, 2035: 3, 3004: 4}
+    world_thing_kind = {
+        2014: 0, 2015: 1, 2019: 2, 2035: 3, 3004: 4,
+        2011: 5, 2012: 6, 2018: 7, 2007: 8, 2048: 9,
+        2008: 10, 2049: 11, 2001: 12, 3001: 13,
+    }
     things = [[] for _ in subsectors]
     for tx, ty, _angle, thing_type, flags in m["things"]:
         if (flags & 0x10 or not flags & THING_SKILL_FLAG or
@@ -777,8 +838,10 @@ def convert_wad(wadpath, mapname, full=False):
     print(f"trim: kept {len(kept)}/{len(m['sectors'])} sectors, "
           f"{len(kept_ss)}/{len(ss_segs)} subsectors; textures: {slots}")
     return (verts, segs, nodes, subsectors, sectors, root,
-            (ppx, ppy, pang), EYE_WAD, reject, things, doors, door_uses), \
-        {"slots": slots, "sec_tex": [dict(c) for c in sec_tex]}
+            (ppx, ppy, pang), EYE_WAD, reject, things, doors, door_uses,
+            lifts, exit_uses), \
+        {"slots": slots, "sec_tex": [dict(c) for c in sec_tex],
+         "sec_floor_flat": [m["sector_flats"][old][0] for old in kept_sorted]}
 
 
 def main():

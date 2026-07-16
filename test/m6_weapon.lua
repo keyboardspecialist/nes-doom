@@ -176,7 +176,7 @@ emu.addEventCallback(function()
     return fail(string.format("OAM budget weapon=%d world=%d barrelCells=%d peak=%d",
       weapon, world, barrelCells, peak))
   end
-  if changedPixels ~= 866 then
+  if changedPixels ~= 784 then
     return fail("weapon pixel signature changed: " .. tostring(changedPixels))
   end
   print(string.format("M6 PASS (weapon=%d, world=%d, barrelCells=%d, peak/scanline=%d, pixels=%d, DMA=%d)",

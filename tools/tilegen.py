@@ -562,6 +562,14 @@ def build_sprites(wadpath):
                 assert meta_count[-1] > 0
         kind_world_h.append(max(1, round(native_h * 0.4)))
 
+    # Stateful E1M1 things exactly fill the 64-slot runtime payload. Six CHR
+    # pages are already occupied, so new gameplay kinds explicitly alias the
+    # closest existing art until area-banked sprite sets are introduced.
+    for source_kind in (0, 0, 2, 1, 1, 1, 1, 1, 4):
+        kind_base.append(kind_base[source_kind])
+        frame_masks.append(frame_masks[source_kind])
+        kind_world_h.append(kind_world_h[source_kind])
+
     barrel_exp_meta_first, barrel_exp_meta_count = [], []
     barrel_exp_dx, barrel_exp_dy = [], []
     barrel_exp_tile, barrel_exp_attr = [], []
@@ -1376,6 +1384,7 @@ def main():
         texinfo = json.load(open(args.texlist))
         texlist = texinfo["slots"]
         sec_tex = texinfo["sec_tex"]
+        sec_floor_flat = texinfo.get("sec_floor_flat", [""] * len(sec_tex))
         names = [t["name"] for t in texlist]
         max_cls = [t["max_class"] for t in texlist]
         rgb_maps, tex_bins, thresholds, native_heights = wad_textures(args.wad, names)
@@ -1418,9 +1427,13 @@ def main():
         # made the same slice-bank bit mean different things and gave a tiny
         # trim texture the same palette vote as a room's dominant wall.
         sec_pal = []
-        for stex in sec_tex:
+        for sector_index, stex in enumerate(sec_tex):
             if not stex:
-                sec_pal.extend(bg_palettes)
+                palettes = list(bg_palettes)
+                if sec_floor_flat[sector_index].startswith("NUKAGE"):
+                    palettes[8:16] = [0x0F, 0x3A, 0x2A, 0x1A,
+                                       0x0F, 0x2A, 0x1A, 0x0A]
+                sec_pal.extend(palettes)
                 continue
             merged = [{c: [0.0, 0.0, 0.0, 0.0] for c in (1, 2, 3)}
                       for _ in range(2)]
@@ -1453,7 +1466,11 @@ def main():
                 # Two used MMC5 ramps must not collapse to one hue.  Keep the
                 # local dominant warm fit and restore the global cool/gray fit.
                 bases[1] = ramp_bases[1]
-            sec_pal.extend(derive_palettes(bases))
+            palettes = derive_palettes(bases)
+            if sec_floor_flat[sector_index].startswith("NUKAGE"):
+                palettes[8:16] = [0x0F, 0x3A, 0x2A, 0x1A,
+                                   0x0F, 0x2A, 0x1A, 0x0A]
+            sec_pal.extend(palettes)
     hud = None
     hud_bank_data = None
     sprite_meta = None

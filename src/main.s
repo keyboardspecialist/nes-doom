@@ -172,6 +172,11 @@ reset:
     sta ENEMY_ATTACKS
     sta ENEMY_HITS
     sta EXPLOSION_OAM_COUNT
+    sta LEVEL_COMPLETE
+    sta PICKUP_SOUND_PENDING
+    sta PLAYER_PAIN_SOUND_PENDING
+    sta DOOR_SOUND_PENDING
+    sta EXIT_SOUND_PENDING
 .ifdef FULL_E1M1
     sta FULL_SEG1_SEEN
     sta FULL_HIGH_VERTEX_SEEN
@@ -196,6 +201,8 @@ reset:
     cmp #3
     beq @thing_has_health
     cmp #4
+    beq @thing_has_health
+    cmp #13
     bne :+
 @thing_has_health:
     lda #20
@@ -306,6 +313,17 @@ main_loop:
 main_loop:
     inc heartbeat
     jsr render_frame
+.ifdef E1M1
+    lda LEVEL_COMPLETE
+    beq :+
+@wait_exit_sound:
+    lda EXIT_SOUND_PENDING
+    bne @wait_exit_sound
+    lda NOISE_HOLD
+    bne @wait_exit_sound
+    jmp reset
+:
+.endif
     lda #1
     sta back_ready
 @wait:

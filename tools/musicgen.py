@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Compile Doom MUS into bounded 60 Hz NES APU/MMC5 commands."""
 import argparse
-import math
 import struct
 from collections import defaultdict
 
@@ -134,31 +133,33 @@ def _percussion_recipe(notes):
     bell = 53 in note_set
     hat = 46 in note_set
 
-    dpcm = 2 if snare else (1 if kick else (3 if tom else 0))
     if crash:
         noise = 0x04
-        length = 0x28
-    elif bell:
-        noise = 0x86
-        length = 0x18
-    elif ride:
-        noise = 0x84
-        length = 0x20
-    elif hat:
-        noise = 0x82
-        length = 0x10
+        length = 0x68
     elif snare:
         noise = 0x07
-        length = 0x20
+        length = 0x38
+    elif kick:
+        noise = 0x0F
+        length = 0x28
     elif tom:
         noise = 0x0C
+        length = 0x38
+    elif bell:
+        noise = 0x06
+        length = 0x28
+    elif ride:
+        noise = 0x04
+        length = 0x48
+    elif hat:
+        noise = 0x02
         length = 0x18
     else:
         noise = 0
         length = 0
     velocity = max((velocity for _note, velocity, _order in notes), default=0)
     volume = min(12, (15 * velocity + 63) // 127) if noise else 0
-    return (noise, length, dpcm), volume
+    return (noise, length), volume
 
 
 def compile_score(mus):
@@ -301,7 +302,7 @@ def compile_score(mus):
     tables[VOICE_TRI] = [(0, 0)] + [(period & 0xFF, period >> 8)
                                           for (period,) in state_lists[VOICE_TRI][1:]]
     total = len(stream) + sum(len(values) * 2 for values in tables.values()) \
-        + len(recipe_list) * 3
+        + len(recipe_list) * 2
     if total > 8192:
         raise ValueError(f"compiled music bank is {total} bytes")
     return {
@@ -314,45 +315,6 @@ def compile_score(mus):
     }
 
 
-def _dpcm_encode(samples, byte_length):
-    level = 64
-    out = bytearray()
-    for byte_index in range(byte_length):
-        value = 0
-        for bit in range(8):
-            sample_index = byte_index * 8 + bit
-            target = samples[min(sample_index, len(samples) - 1)]
-            if target >= level:
-                value |= 1 << bit
-                level = min(126, level + 2)
-            else:
-                level = max(0, level - 2)
-        out.append(value)
-    return bytes(out)
-
-
-def build_dpcm_samples():
-    def tone(count, start_hz, end_hz, noise=0):
-        phase = 0.0
-        seed = 0x4D35
-        values = []
-        for i in range(count):
-            t = i / max(1, count - 1)
-            hz = start_hz + (end_hz - start_hz) * t
-            phase += 2.0 * math.pi * hz / 11186.0
-            envelope = (1.0 - t) ** 1.7
-            seed = ((seed >> 1) ^ (0xB400 if seed & 1 else 0)) & 0xFFFF
-            fuzz = ((seed & 255) - 128) * noise / 128.0
-            values.append(round(64 + envelope * (46 * math.sin(phase) + fuzz)))
-        return [max(0, min(127, value)) for value in values]
-
-    return {
-        "kick": _dpcm_encode(tone(129 * 8, 105, 42), 129),
-        "snare": _dpcm_encode(tone(257 * 8, 150, 85, noise=38), 257),
-        "tom": _dpcm_encode(tone(193 * 8, 92, 55, noise=4), 193),
-    }
-
-
 def _write_bytes(out, label, values):
     out.write(f"{label}:\n")
     for offset in range(0, len(values), 16):
@@ -360,7 +322,7 @@ def _write_bytes(out, label, values):
             f"${value:02X}" for value in values[offset:offset + 16]) + "\n")
 
 
-def write_assembly(path, compiled, dpcm):
+def write_assembly(path, compiled):
     names = {VOICE_APU_P1: "apu_p1", VOICE_APU_P2: "apu_p2",
              VOICE_TRI: "tri", VOICE_MMC5_P1: "mmc5_p1",
              VOICE_MMC5_P2: "mmc5_p2"}
@@ -369,7 +331,7 @@ def write_assembly(path, compiled, dpcm):
         out.write(".export music_stream, music_stream_end\n")
         for name in names.values():
             out.write(f".export music_{name}_lo, music_{name}_meta\n")
-        out.write(".export music_noise_period, music_noise_length, music_noise_dpcm\n")
+        out.write(".export music_noise_period, music_noise_length\n")
         out.write(".export MUSIC_BANK_BYTES : absolute\n")
         out.write(f"MUSIC_BANK_BYTES = {compiled['bank_bytes']}\n")
         out.write('.segment "MUSIC0"\n')
@@ -382,20 +344,6 @@ def write_assembly(path, compiled, dpcm):
             _write_bytes(out, f"music_{names[voice]}_meta", [value[1] for value in values])
         _write_bytes(out, "music_noise_period", [value[0] for value in compiled["recipes"]])
         _write_bytes(out, "music_noise_length", [value[1] for value in compiled["recipes"]])
-        _write_bytes(out, "music_noise_dpcm", [value[2] for value in compiled["recipes"]])
-
-        out.write('.segment "DPCM"\n')
-        offset = 0
-        for name in ("kick", "snare", "tom"):
-            aligned = (offset + 63) & ~63
-            if aligned > offset:
-                out.write(f"    .res {aligned - offset}, $55\n")
-            offset = aligned
-            out.write(f".export dpcm_{name}\n")
-            _write_bytes(out, f"dpcm_{name}", dpcm[name])
-            offset += len(dpcm[name])
-        if offset > 0x7FA:
-            raise ValueError("DPCM samples overlap vectors")
 
 
 def main():
@@ -407,11 +355,9 @@ def main():
     wad = wadlib.Wad(args.wad)
     mus = parse_mus(wad.lump(args.lump))
     compiled = compile_score(mus)
-    dpcm = build_dpcm_samples()
-    write_assembly(args.out, compiled, dpcm)
+    write_assembly(args.out, compiled)
     print(f"music: {len(mus['events'])} events, {mus['duration_ticks']} ticks, "
           f"{len(compiled['records'])} records, {compiled['bank_bytes']} bytes")
-    print("DPCM: " + ", ".join(f"{name}={len(data)}" for name, data in dpcm.items()))
 
 
 if __name__ == "__main__":

@@ -4,15 +4,20 @@
 
 .ifdef E1M1
 
-.import sec_ceil, door_sector, door_closed, door_open
+.import sec_floor, sec_ceil, door_sector, door_closed, door_open
 .import door_use_x_lo, door_use_x_hi, door_use_y_lo, door_use_y_hi, door_use_id
 .import MAP_SECTOR_COUNT : absolute
 .import DOOR_COUNT : absolute
 .import DOOR_USE_COUNT : absolute
+.import LIFT_COUNT, EXIT_USE_COUNT : absolute
+.import lift_sector, lift_high, lift_low
+.import lift_x1_lo, lift_x1_hi, lift_y1_lo, lift_y1_hi
+.import lift_x2_hi, lift_y2_hi
+.import exit_use_x_lo, exit_use_x_hi, exit_use_y_lo, exit_use_y_hi
 .import ss_first_lo, ss_first_hi, ss_count
 .import find_subsector, load_seg, fetch_vertex, sub_cam, zdot, xdot
 
-.export init_doors, update_doors, try_use
+.export init_doors, update_doors, try_use, check_walk_special
 
 DOOR_HOLD = 240
 DOOR_USE_RANGE = 416        ; 26 converted world units (64 Doom units)
@@ -42,6 +47,9 @@ update_doors:
 try_use:
     DOOR_CALL try_use_impl
 
+check_walk_special:
+    DOOR_CALL check_walk_special_impl
+
 .segment "DOORCODE"
 
 init_doors_impl:
@@ -49,6 +57,8 @@ init_doors_impl:
     beq @clear
 @copy_ceil:
     dex
+    lda sec_floor,x
+    sta SECTOR_FLOOR_RT,x
     lda sec_ceil,x
     sta SECTOR_CEIL_RT,x
     cpx #0
@@ -66,6 +76,12 @@ init_doors_impl:
     bpl @clear_door
     lda frame_cnt
     sta DOOR_LAST_FRAME
+    sta LIFT_LAST_FRAME
+    lda #0
+    sta LIFT_STATE
+    sta LIFT_POS
+    sta LIFT_PHASE
+    sta LIFT_WAIT
     rts
 
 update_doors_impl:
@@ -175,6 +191,8 @@ update_doors_impl:
 @start_close:
     lda #3
     sta DOOR_STATE,x
+    lda #1
+    sta DOOR_SOUND_PENDING
     lda #0
     sta DOOR_PHASE,x
     sta DOOR_PASSABLE,x     ; closing becomes solid before its first frame
@@ -189,6 +207,219 @@ update_doors_impl:
     inx
     jmp @door
 @done:
+    jsr update_lift_impl
+    rts
+
+update_lift_impl:
+    lda #<LIFT_COUNT
+    bne :+
+    rts
+:
+    lda LIFT_STATE
+    bne :+
+    rts
+:
+    cmp #2
+    beq @lift_waiting
+    lda LIFT_PHASE
+    clc
+    adc DOOR_ELAPSED
+    sta rt_acc
+    and #3
+    sta LIFT_PHASE
+    lda rt_acc
+    lsr
+    lsr
+    bne :+
+    jmp @lift_materialize
+:
+    sta rt_acc
+    lda LIFT_STATE
+    cmp #1
+    bne @lift_raising
+    lda lift_high
+    sec
+    sbc lift_low
+    sta rt_dx
+    lda LIFT_POS
+    clc
+    adc rt_acc
+    cmp rt_dx
+    bcc :+
+    lda rt_dx
+    sta LIFT_POS
+    lda #2
+    sta LIFT_STATE
+    lda #180
+    sta LIFT_WAIT
+    ldx #<DOOR_COUNT
+    lda #1
+    sta DOOR_PASSABLE,x
+    jmp @lift_materialize
+:   sta LIFT_POS
+    jmp @lift_materialize
+@lift_raising:
+    lda LIFT_POS
+    cmp rt_acc
+    bcc @lift_top
+    beq @lift_top
+    sec
+    sbc rt_acc
+    sta LIFT_POS
+    jmp @lift_materialize
+@lift_top:
+    lda #0
+    sta LIFT_POS
+    sta LIFT_STATE
+    sta LIFT_PHASE
+    ldx #<DOOR_COUNT
+    sta DOOR_PASSABLE,x
+    jmp @lift_materialize
+@lift_waiting:
+    lda LIFT_WAIT
+    cmp DOOR_ELAPSED
+    bcc @lift_start_raise
+    beq @lift_start_raise
+    sec
+    sbc DOOR_ELAPSED
+    sta LIFT_WAIT
+    jmp @lift_materialize
+@lift_start_raise:
+    lda #3
+    sta LIFT_STATE
+    lda #0
+    sta LIFT_PHASE
+    ldx #<DOOR_COUNT
+    sta DOOR_PASSABLE,x
+@lift_materialize:
+    ldx lift_sector
+    lda lift_high
+    sec
+    sbc LIFT_POS
+    sta SECTOR_FLOOR_RT,x
+    rts
+
+check_walk_special_impl:
+    lda #<LIFT_COUNT
+    bne :+
+    rts
+:
+    lda LIFT_STATE
+    beq :+
+    rts
+:
+    lda px
+    cmp PLAYER_PREV_X
+    bne @walk_bounds
+    lda px+1
+    cmp PLAYER_PREV_X+1
+    bne @walk_bounds
+    lda py
+    cmp PLAYER_PREV_Y
+    bne @walk_bounds
+    lda py+1
+    cmp PLAYER_PREV_Y+1
+    beq @walk_done
+@walk_bounds:
+    lda px+1
+    cmp lift_x1_hi
+    bcc @walk_done
+    cmp lift_x2_hi
+    bcc @check_walk_y
+    beq @check_walk_y
+    bcs @walk_done
+@check_walk_y:
+    lda py+1
+    cmp lift_y1_hi
+    bcc @walk_done
+    cmp lift_y2_hi
+    bcc @walk_side
+    beq @walk_side
+    bcs @walk_done
+@walk_side:
+    jsr lift_line_side
+    sta DOOR_BEST_LO
+    lda px
+    pha
+    lda px+1
+    pha
+    lda py
+    pha
+    lda py+1
+    pha
+    lda PLAYER_PREV_X
+    sta px
+    lda PLAYER_PREV_X+1
+    sta px+1
+    lda PLAYER_PREV_Y
+    sta py
+    lda PLAYER_PREV_Y+1
+    sta py+1
+    jsr lift_line_side
+    sta DOOR_BEST_HI
+    pla
+    sta py+1
+    pla
+    sta py
+    pla
+    sta px+1
+    pla
+    sta px
+    lda DOOR_BEST_LO
+    eor DOOR_BEST_HI
+    bpl @walk_done
+    lda #1
+    sta LIFT_STATE
+    lda #0
+    sta LIFT_PHASE
+@walk_done:
+    rts
+
+; Approximate the trigger diagonal with its 4:7 high-resolution slope.
+; Return the signed high byte of (x-x1)*4 - (y-y1)*7.
+lift_line_side:
+    lda px
+    sec
+    sbc lift_x1_lo
+    sta rt_dx
+    lda px+1
+    sbc lift_x1_hi
+    sta rt_dx+1
+    asl rt_dx
+    rol rt_dx+1
+    asl rt_dx
+    rol rt_dx+1
+    lda rt_dx
+    sta rt_acc
+    lda rt_dx+1
+    sta rt_acc+1
+    lda py
+    sec
+    sbc lift_y1_lo
+    sta rt_dy
+    sta mul_a
+    lda py+1
+    sbc lift_y1_hi
+    sta rt_dy+1
+    sta mul_a+1
+    asl rt_dy
+    rol rt_dy+1
+    asl rt_dy
+    rol rt_dy+1
+    asl rt_dy
+    rol rt_dy+1
+    lda rt_dy
+    sec
+    sbc mul_a
+    sta rt_dy
+    lda rt_dy+1
+    sbc mul_a+1
+    sta rt_dy+1
+    lda rt_acc
+    sec
+    sbc rt_dy
+    lda rt_acc+1
+    sbc rt_dy+1
     rts
 
 ; Return floor((phase + elapsed) / 2) in A and retain the half-unit phase.
@@ -417,7 +648,7 @@ try_use_impl:
     ldx DOOR_BEST_ID
     cpx #$FF
     bne :+
-    rts
+    jmp try_exit_impl
 :   lda DOOR_STATE,x
     cmp #2
     bne :+
@@ -428,10 +659,60 @@ try_use_impl:
     beq @used
     lda #1
     sta DOOR_STATE,x
+    sta DOOR_SOUND_PENDING
     lda #0
     sta DOOR_PHASE,x
     sta DOOR_PASSABLE,x
 @used:
+    rts
+
+try_exit_impl:
+    lda #<EXIT_USE_COUNT
+    bne :+
+    rts
+:
+    lda exit_use_x_lo
+    sta wx
+    lda exit_use_x_hi
+    sta wx+1
+    lda exit_use_y_lo
+    sta wy
+    lda exit_use_y_hi
+    sta wy+1
+    jsr sub_cam
+    jsr zdot
+    lda ttz+1
+    bmi @exit_done
+    cmp #>DOOR_USE_RANGE
+    bcc @exit_facing
+    bne @exit_done
+    lda ttz
+    cmp #<(DOOR_USE_RANGE+1)
+    bcs @exit_done
+@exit_facing:
+    jsr xdot
+    lda ttx+1
+    bpl :+
+    sec
+    lda #0
+    sbc ttx
+    sta ttx
+    lda #0
+    sbc ttx+1
+    sta ttx+1
+:
+    lda ttx+1
+    cmp #>DOOR_USE_WIDTH
+    bcc @complete
+    bne @exit_done
+    lda ttx
+    cmp #<(DOOR_USE_WIDTH+1)
+    bcs @exit_done
+@complete:
+    lda #1
+    sta LEVEL_COMPLETE
+    sta EXIT_SOUND_PENDING
+@exit_done:
     rts
 
 .endif
