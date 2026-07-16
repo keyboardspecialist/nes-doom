@@ -1,12 +1,14 @@
 # Doom on the NES via MMC5 — Feasibility Study
 
-**Verdict: feasible at ~8–15 fps with real Doom geometry, heavily quantized.**
-A proof-of-concept ROM in this repository renders BSP-traversed sectors with
-variable floor/ceiling heights, arbitrary wall angles, textured walls, portal
-occlusion, and per-sector + distance lighting on emulated stock NES hardware
-(MMC5 mapper), verified by an automated Mesen2 test suite (`make test`,
-milestones M1–M5). All numbers below are measured from those runs
-(NTSC timing, Mesen2 on macOS, 2026-07-13).
+**Verdict: feasible at roughly 3–15 fps with real Doom geometry, heavily
+quantized, with enclosed views reaching 30 fps.** The repository now contains
+a playable full-E1M1 cartridge rather than only a rendering proof of concept.
+It renders BSP-traversed sectors with variable floor/ceiling heights, arbitrary
+wall angles, textured walls, portal occlusion, per-sector + distance lighting,
+sprites, combat, pickups, doors, a lift, and an exit on emulated NES hardware
+using MMC5. The automated Mesen2 suite covers milestones M1–M15, and 25 Python
+tests cover the content pipeline. Measurements below use NTSC timing in Mesen2
+on macOS through 2026-07-15.
 
 No native NES Doom or Wolfenstein port existed before this; the 2019 "Doom on
 an unmodified NES" ran a Raspberry Pi inside the cartridge. The closest real
@@ -38,15 +40,18 @@ PAL-only for exactly this reason). Instead:
 | Parameter | Quantization |
 |---|---|
 | Column width | 8 px (32 columns) |
-| Wall screen height | 13 classes {1–8,10,12,14,16,20} tiles; class = smallest ≥ span; spans > 20 pixel-double vertically |
-| Texture u | 8-texel phases (4-texel, 16 phases for zoom classes 12-20), du/dx fixed within a slice |
-| Vertical | wall tops snap to tile rows (horizon at row 10, eye fixed 48 units) |
-| Light | 4 levels = ExRAM palette bits (sector light + distance, clamped) |
+| Wall screen height | 14 classes {1–10,12,14,16,20} tiles; class = smallest ≥ span; spans > 20 pixel-double vertically |
+| Texture u | Isotropic mip width by class: 64, 32, 16, 8, or 4 texels; phase count = 64/width |
+| Vertical | Pixel-precise sloped edge tiles around tile-row wall interiors; horizon at row 10 |
+| Light/color | 2 hue ramps × 2 distance-light levels, with surface-anchored half-step dissolve |
 
-Measured tile cost: **1360 tiles per texture** since the 2x-zoom classes
-(866 before them), 6 x 4KB banks each. At 6 banks/texture, **10 textures +
-flats fill one 256KB $5130 window**; 1MB CHR holds 4 per-level texture
-sets. Light costs zero tiles.
+The original fixed allocation reached 1,360 tiles and six 4KB banks per
+texture. The current pipeline uses isotropic mip widths and prunes unreachable
+height classes per texture, then packs variable-sized texture data. Full E1M1
+fits **16 texture slots** into gameplay window 0: base wall slices are reserved
+banks 0–42 and half-row variants 43–59 (the current full artifact reaches banks
+41 and 58 respectively). Flats, HUD helpers, and silhouettes use banks 60–62.
+Light still costs zero tiles.
 
 ## Frame pipeline (measured)
 
@@ -54,19 +59,24 @@ Screen: 3D view 32×20 tiles (256×160), status bar rows 20–24 (lines 160–19
 letterbox lines 200–240. Two MMC5 scanline IRQs per frame (compare $5203,
 single-scanline precision measured: IRQ lands on line 160/199 every frame):
 
-- **Line 160**: status-bar split (static tiles; just re-arm for 199).
+- **Line 160**: briefly blank, select the HUD CHR window, and load the HUD's
+  four palettes before re-arming the relative compare for line 199.
 - **Line 199**: blank rendering → 42-line letterbox window; flip ExRAM to
   mode %10 (CPU-writable while blanked); push 10 columns.
-- **NMI (241)**: OAM DMA first, push 3 more columns, restore ExAttr mode +
-  scroll + rendering, re-arm IRQ (mandatory: in-frame detection stops while
+- **NMI (241)**: OAM DMA first, push three more columns in the synthetic build
+  or two in E1M1, restore gameplay CHR/palettes, ExAttr mode, scroll, and
+  rendering, then re-arm IRQ (mandatory: in-frame detection stops while
   blanked, so NMI is the only guaranteed wake-up).
 
 Measured push cost: **~410 cycles per column** (20 NT bytes via $2007
 increment-32 + 20 ExRAM absolute stores, fully unrolled per column, two 8KB
 code banks of generated pushers dispatched through a bank-top JMP table).
-13 columns/frame → **full 1280-byte frame flip in 2.49 frames** (241 flips in
-600, pusher-limited). Letterbox blank timing: scanline 199 with zero jitter
-(±1 line reported once the renderer loads the main thread; the seam is black).
+The synthetic quota can transfer a complete buffer in **2.49 frames** at 13
+columns/frame; E1M1's 12-column quota has an approximately 2.7-frame transfer
+floor. These are bandwidth limits, not current end-to-end frame rates: M3
+publishes 100 flips in 600 frames (6.00 frames/flip), and the trimmed E1M1 test
+publishes 73 in 700 (9.59 frames/flip), because composition is slower than the
+pusher. Letterbox blank timing remains at scanline 199; the seam is black.
 
 ## Renderer cost (measured, micro-map: 3 sectors, 25 segs, 5 BSP nodes)
 
@@ -96,7 +106,7 @@ in software).
 | Scanline IRQ | status split + letterbox bandwidth | M1/M3: exact line, every frame |
 | Multiplier | all projection math | M4/M5 renders correct geometry |
 | PRG-RAM ($5113) | double compose buffers (2×1280B) + scratch | M3+ |
-| 1MB PRG/CHR | tables + slices (36KB CHR used so far) | build |
+| 128KB PRG + 1MB CHR | code/map/audio + pre-rendered slices and sprites | build/link map |
 
 **Hardware caveats.** (1) In Mesen, blanking mid-frame freezes the MMC5
 scanline counter at the compare value and the pending flag re-asserts after
@@ -109,47 +119,49 @@ the ROM is NES 2.0-legal but real hardware means a custom board.
 
 ## Honest limitations at this stage
 
-- **Sprites are the weak point** (not yet in the PoC): OAM 8×16 with MMC5's
-  separate sprite banks and prescaled frames works, but 8 sprites/scanline
-  = 64px of enemy per line; flicker-cycling and low monster caps required.
-- Texture u is now perspective-corrected in 8-column chunks (see below);
-  residual affine drift within a chunk is under the 8-texel phase quantum.
-  Spans over 20 rows render pixel-doubled vertically (vshift) instead of
-  cropping, so near walls no longer smear their last texel row.
-- One shared 3-color ramp across wall textures (2bpp tiles + 4-palette ramp);
-  flats are solid colors (no span texturing); no sky yet (trivial: strips).
-- Fixed eye height; camera stays walkable-area-clamped.
-- The micro-map is hand-authored; a real WAD subset needs mapconv.py to
-  parse/rescale WAD lumps and split segs on partition lines (mechanical, but
-  unwritten). Doom-scale coordinates must rescale into s11.4 (±2047 units).
-- Full E1M1 is available as `make e1m1-full`: 533 converted vertices, 816
-  split segs, 237 subsectors, 236 nodes, 85 sectors, and all 64 medium-skill
-  gameplay things, including four zombiemen and two imps. New item/imp kinds
-  currently use explicit aliases in the six-page world sprite atlas.
-  Two `$A000` banks hold 12-byte staged seg records, one holds vertices/nodes,
-  and the common bank holds subsector/sector/REJECT/thing data. Vertex endpoint
-  indices are 16-bit; indices above 255 use the uncached angle path. Sector
-  palettes moved to fixed ROM so NMI is independent of the selected map bank.
-  Node/subsector byte indices still fit E1M1. Linedef specials drive the map's
-  repeatable lift and exit switch, and NUKAGE sectors install green floor ramps.
-- Sprite CHR uses six static 1KB world pages plus a two-page active weapon
-  frame selected in NMI. Close living zombiemen and their first death frame
-  use 32px bakes; fallen frames remain 16px. The line-160 HUD IRQ selects
-  ExAttr window 1 (physical bank 125), with NMI restoring window 0 for play.
+- Sprites work, but the PPU still permits only eight sprites per scanline. The
+  software composer enforces that limit, uses six static 1KB world pages, and
+  reserves two pages for the active weapon frame. The current full map is
+  deliberately capped at six monsters.
+- The sprite atlas is full. Stimpack, medikit, armor, ammo, shell, shotgun, and
+  imp kinds use explicit existing-art aliases; the imp currently shares the
+  zombieman's art and compact behavior. The shotgun acts as shell ammunition
+  until weapon switching exists.
+- Enemy pursuit is collision-tested but has no pathfinding. Monsters stop at
+  walls and closed doors rather than navigating around them.
+- Texture u is perspective-corrected in eight-column chunks. Residual affine
+  drift within a chunk stays below the baked phase quantum. Spans over 20 rows
+  pixel-double vertically instead of cropping.
+- Floors and ceilings are palette-colored rather than texture-mapped spans.
+  NUKAGE receives green floor ramps, but there is no sky renderer yet.
+- Eye height is fixed relative to the current mutable sector floor.
+- Node and subsector indices remain bytes; that is sufficient for E1M1 but not
+  a general guarantee for larger maps.
+- The NES 2.0 ROM requires 1MB CHR-ROM on MMC5. No historical MMC5 board offered
+  that combination, so physical execution requires a custom cartridge.
 
 ## Scaling estimates to "real" content
 
-A stripped E1M1-class scene means ~10–20 visible segs and deeper BSP walks —
-the measured per-seg overhead (~20 multiplies ≈ 3k cycles) and per-column
-emit (~400–600 cycles) put a 30-seg view around 5–7 frames/pass: the PoC's
-measured envelope, i.e. **~8–12 fps holds if visible-seg counts stay Doom-like**.
-CHR budget (16 textures/level window) and PRG (128KB used: 4.4KB tables/map,
-2.7KB code, 16.3KB pushers — 1MB available) leave enormous headroom for
-sprites, more height classes, more textures, and a status-bar font.
+Full E1M1 demonstrates that scene cost, not nominal map size, is decisive.
+Enclosed views complete in 2–7 video frames, while broad hangar views have
+historically taken up to 20. The latest full-map regression bounds the start
+view to at most 30 frames and reports 14 frames in the southern view with all
+six monsters active. The practical envelope is therefore about **3–15 fps**,
+with simple enclosed views reaching 30 fps.
+
+Capacity remains adequate but placement is no longer abstractly "enormous."
+The linked full cartridge uses 72,561 of 131,072 PRG-ROM bytes. Its generated
+CHR prefix/highest allocated extent is 536,576 of 1,048,576 bytes, including
+large zero-padded holes between windows. Bank-local pressure is tighter: main
+code has 348 bytes free, fixed code 875, music 207, and the first full-map seg
+bank only eight. WRAM bank 0 reserves about 6,460 of 8,192 bytes. Three PRG
+banks and three advertised WRAM banks remain wholly unused; see
+`doc/memory-budgets.md`.
 
 ## Real WAD content: E1M1 (added 2026-07-13, second session)
 
-A full WAD pipeline now builds `nesdoom-e1m1.nes` from shareware `Doom1.WAD`:
+A full WAD pipeline builds `nesdoom-e1m1.nes` and
+`nesdoom-e1m1-full.nes` from the checked-in shareware `Doom1.WAD`:
 
 - **tools/wadlib.py** parses the WAD (lumps, TEXTURE1/PNAMES patch
   composition, PLAYPAL, REJECT).
@@ -531,10 +543,10 @@ Headroom that did remain, both landed this session:
   h units), so mapconv tracks each texture's max part height, converts it
   through the engine's vshift reduction to a max reachable class (+1
   margin), and texture selection becomes bank-budget-driven. tilegen bakes
-  only reachable classes and packs variable-size textures sequentially
-  into banks 0-59 (flats/HUD/edges stay fixed at 60/61/62). E1M1: **15
-  texture slots** (was 12) in ~58 banks — STEP6 prunes to class 6,
-  BROWN1 to 9.
+  only reachable classes and packs variable-size textures sequentially.
+  Base slices reserve banks 0-42, half-row variants 43-59, and flats/HUD/edges
+  remain fixed at 60/61/62. Full E1M1 now fills **16 texture slots**; missing
+  source textures use explicit converter substitutions.
 
 Still on the table, costed: class 18 (halves the worst vertical rescale
 seam, ~1-2 slots after pruning) and dithered floor-shade tiles (cheap).
@@ -548,6 +560,70 @@ hits. The complete 96-second loop, period/volume tables, and percussion recipes
 occupy 7,985 bytes in PRG08. Runtime playback performs no
 voice allocation or pitch math and processes at most six channel updates per
 frame. Gameplay noise effects retain priority without interrupting tonal music.
+
+## Full-map gameplay integration (eighth session)
+
+The full target now converts and initializes the complete medium-skill E1M1
+gameplay payload: 533 vertices, 816 segs, 237 subsectors, 236 nodes, 85 sectors,
+and 64 runtime things. Four zombiemen and two imp-kind actors pursue and attack;
+health, armor, ammunition, barrels, explosions, deaths, pickups, and the HUD are
+persistent mutable state rather than render-only decoration.
+
+**World collision and specials.** Player movement uses a 6.4375-unit circle
+against one-sided segs, explicitly impassable two-sided lines, openings with
+insufficient height or excessive steps, and non-passable dynamic doors. It
+scans both the old and candidate BSP leaves. Doors animate through mutable
+ceiling heights. The E1M1 lift uses a mutable floor shadow, requires a true
+movement-side transition across its linedef, lowers, waits, raises, and changes
+passability with its floor. Using the exit switch plays its report and returns
+to TITLEPIC.
+
+**Pickups and bank invariants.** Pickup collision scans all active runtime
+things after movement with a 16-unit radial test. An intermittent full-map miss
+was traced to successful point location leaving `$A000` mapped to `MAPGEOM`;
+post-movement simulation then interpreted geometry bytes as thing metadata.
+`render_frame` now restores `MAP_COMMON_BANK` immediately after `update_cam`.
+This fixed moving-through-item misses and also prevented expiration logic from
+clearing unrelated active bits. M15 walks completely through thing 63 while
+holding movement and verifies one reward, one active-bit clear, and no collateral
+state changes.
+
+**Enemy walls and sight.** The first LOS implementation sampled sixteen points
+with only a two-unit collision radius, allowing consecutive samples to land
+on opposite sides of a thin wall. The trace now uses a six-unit radius, whose
+12-unit diameter overlaps the maximum 11.31-unit diagonal sample spacing at the
+128-unit attack-range limit. Enemy pursuit is also collision-tested in one-unit
+axis steps. Its fast path scans the current convex leaf; after a portal crossing
+it validates the candidate circle against the new leaf so corners and jambs
+remain solid. This keeps the full-map regression responsive (14 frames in the
+southern view with six monsters), whereas using the full two-leaf player query
+for every actor exposed a 28-frame zero-render-progress interval. There is still
+no route finding: a blocked actor stops.
+
+**Audio.** Tonal music stays on the four pulse channels plus triangle. DPCM was
+removed; percussion and gameplay reports share long-LFSR noise. Pickup, door,
+empty weapon, pistol, pain, enemy, explosion, and exit reports have explicit
+priorities, and a held high-priority report cannot be preempted by any lower
+intermediate level.
+
+**Regression status.** `make test` passes 25 Python tests plus M1–M15. Coverage
+now includes boot/IRQ timing, ExAttr, bandwidth, BSP rendering, collision,
+sprites, pickups, combat, title, music, doors, animated face HUD, moving pickup
+banking, static and dynamic-door LOS, collision-aware pursuit, lift state, and
+exit-to-title behavior. Full-map rendering remains within its 30-frame start
+budget; the latest southern run reports `pass_frames=14`.
+
+## Build and release automation
+
+`Doom1.WAD` is checked in as the 4,196,020-byte shareware IWAD (SHA-256
+`bb449c7480e9a02a62012d041406e8e43daa51caa0650646d1307d8650b8f837`).
+`.github/workflows/build.yml` installs cc65 on Ubuntu, runs the portable Python
+suite, builds `nesdoom-e1m1-full.nes`, and uploads it as the
+`nes-doom-e1m1-full` Actions artifact on `master` pushes, pull requests, and
+manual dispatches. An ordinary branch push intentionally skips release
+publication. Tags matching `v*` run the release job, which creates a new GitHub
+release or replaces the ROM asset on an existing one, attaching the exact ROM
+produced by the build job. The first hosted build completed successfully.
 
 ## Profiling harness (notes)
 
@@ -564,9 +640,12 @@ export screens by printing FNV hashes (or hex pixel rows) to stdout.
 
 ```
 make            # builds nesdoom.nes (micro-map PoC) + nesdoom-m2.nes
-make e1m1       # builds nesdoom-e1m1.nes from Doom1.WAD (in repo root)
-make test       # Python checks plus M1..M11 in Mesen2 headless testrunner
+make e1m1       # builds the trimmed E1M1 cartridge
+make e1m1-full  # builds the complete E1M1 cartridge used by CI/releases
+make test       # 25 Python checks plus M1..M15 in Mesen2 headless testrunner
 make test-e1m1  # E1M1 structural + performance-envelope test
 ```
+
+Push a version tag such as `v0.1.0` to run the tag-only GitHub release job.
 
 ROMs: 1,179,664 bytes each (16B header + 128KB PRG + 1MB CHR), mapper 5, NES 2.0.
