@@ -151,6 +151,12 @@ render_frame:
     lda py+1
     sta PLAYER_PREV_Y+1
     jsr update_cam
+.ifdef FULL_E1M1
+    ; Point location leaves banked geometry at $A000 after successful movement.
+    ; Restore thing and special metadata before post-movement simulation.
+    lda #MAP_COMMON_BANK
+    sta MMC5_PRG_A000
+.endif
 .ifdef E1M1
     jsr check_walk_special
     jsr try_use
