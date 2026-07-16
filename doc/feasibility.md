@@ -1,651 +1,322 @@
-# Doom on the NES via MMC5 — Feasibility Study
+# Feasibility
 
-**Verdict: feasible at roughly 3–15 fps with real Doom geometry, heavily
-quantized, with enclosed views reaching 30 fps.** The repository now contains
-a playable full-E1M1 cartridge rather than only a rendering proof of concept.
-It renders BSP-traversed sectors with variable floor/ceiling heights, arbitrary
-wall angles, textured walls, portal occlusion, per-sector + distance lighting,
-sprites, combat, pickups, doors, a lift, and an exit on emulated NES hardware
-using MMC5. The automated Mesen2 suite covers milestones M1–M15, and 25 Python
-tests cover the content pipeline. Measurements below use NTSC timing in Mesen2
-on macOS through 2026-07-15.
+## Thesis
 
-No native NES Doom or Wolfenstein port existed before this; the 2019 "Doom on
-an unmodified NES" ran a Raspberry Pi inside the cartridge. The closest real
-prior art — tokumaru's raycaster (nesdev.org t=5596, 12–15 fps on hardware,
-178 pre-rendered tiles, no MMC5) — validated the core strategy this project
-scales up.
+The goal is a playable interpretation of Doom that preserves its spatial and
+gameplay identity: BSP-authored rooms, arbitrary wall angles, variable sector
+heights, portals, texture identity, occlusion, monsters, combat, pickups, and
+map interactions. The adaptation concentrates visual reduction in the raster
+representation. Geometry, visibility, and world state retain Doom's structure;
+screen columns, wall scales, texture phases, lighting, and color use bounded
+representations suited to deterministic frame and storage budgets.
 
-## The core idea: write tile indices, not pixels
+MMC5 is the chosen mapper because it combines the four capabilities that
+support this model. Extended attributes select a CHR bank and palette for each
+background cell, turning a tilemap entry into a compact reference to a large
+pre-rendered wall vocabulary. The scanline counter creates stable view, status,
+and transfer regions. The hardware multiplier supports projection and transform
+arithmetic at scene scale. Banked PRG and CHR spaces hold the map, generated
+slices, sprites, audio, and specialized code while fixed banks keep interrupt
+and hot paths resident.
 
-A CHR-RAM framebuffer dies on NTSC vblank bandwidth (2273 CPU cycles/vblank
-≈ 160–380 bytes; a modest bitmap frame needs kilobytes — Elite shipped
-PAL-only for exactly this reason). Instead:
+Wall appearances are generated as CHR slices. Runtime rendering writes tile
+and ExAttr indices into a double-buffered compose surface, then publishes that
+surface by column during scheduled blanking windows. This makes publication
+cost proportional to the 32 x 20 tile grid and independent of the source
+texture detail represented by each tile. The finite slice atlas is controlled
+through height classes, isotropic texture widths, phase quantization,
+height-class pruning, and bank-budgeted texture selection.
 
-1. **Every wall appearance is pre-rendered into CHR-ROM at build time.** A
-   "slice" = one (texture, height-class, u-phase): an 8-px-wide column of the
-   texture rescaled to H tiles, stored contiguously in one 4KB bank.
-2. **MMC5 extended-attribute mode ($5104=%01)** gives every background tile
-   its own ExRAM byte: bits 0–5 pick a 4KB CHR bank (+2 global bits in $5130
-   → 16,384 tiles visible per frame, 4 such windows in 1MB), bits 6–7 pick
-   the palette. Runtime "drawing" is 1 nametable byte + 1 ExRAM byte per 8×8
-   cell.
-3. The engine is Doom's renderer shape — BSP front-to-back, seg projection
-   with per-endpoint perspective divide, per-column occlusion clips — but its
-   output is tile indices in a PRG-RAM compose buffer, pushed to the PPU by a
-   scanline-IRQ-driven pipeline.
+The renderer follows Doom's visibility model because that architecture is
+central to the project: BSP traversal, front-to-back seg processing, solid
+column clips, and portal occlusion define how the world becomes a visible
+scene. Angle gates and silhouette-corner box tests preserve that hierarchy in
+compact table-driven form. Reciprocal depth, interpolated wall heights, and
+perspective-correct texture anchors adapt the projected segs to the tile-based
+output model.
 
-### Quantization lattice (what makes the tile set finite)
+Visual continuity receives dedicated representations inside the same tile
+budget. Mip-filtered slices stabilize distant textures. Sub-row anchoring,
+fractional column coverage, and sloped silhouette tiles preserve thin and
+oblique geometry. Per-slice hue selection, per-sector palette sets, four-level
+luminance quantization, and surface-anchored light dissolves preserve material
+and depth separation. Sprite pages carry actors and weapon animation while the
+background renderer handles world geometry.
 
-| Parameter | Quantization |
+The resulting design sustains a practical 3-15 fps range across E1M1, reaches
+30 fps in enclosed views, and keeps the full map, gameplay state, presentation,
+and generated assets inside the measured budgets.
+
+### Design Rationale
+
+| Decision | Purpose |
 |---|---|
-| Column width | 8 px (32 columns) |
-| Wall screen height | 14 classes {1–10,12,14,16,20} tiles; class = smallest ≥ span; spans > 20 pixel-double vertically |
-| Texture u | Isotropic mip width by class: 64, 32, 16, 8, or 4 texels; phase count = 64/width |
-| Vertical | Pixel-precise sloped edge tiles around tile-row wall interiors; horizon at row 10 |
-| Light/color | 2 hue ramps × 2 distance-light levels, with surface-anchored half-step dissolve |
-
-The original fixed allocation reached 1,360 tiles and six 4KB banks per
-texture. The current pipeline uses isotropic mip widths and prunes unreachable
-height classes per texture, then packs variable-sized texture data. Full E1M1
-fits **16 texture slots** into gameplay window 0: base wall slices are reserved
-banks 0–42 and half-row variants 43–59 (the current full artifact reaches banks
-41 and 58 respectively). Flats, HUD helpers, and silhouettes use banks 60–62.
-Light still costs zero tiles.
-
-## Frame pipeline (measured)
-
-Screen: 3D view 32×20 tiles (256×160), status bar rows 20–24 (lines 160–199),
-letterbox lines 200–240. Two MMC5 scanline IRQs per frame (compare $5203,
-single-scanline precision measured: IRQ lands on line 160/199 every frame):
-
-- **Line 160**: briefly blank, select the HUD CHR window, and load the HUD's
-  four palettes before re-arming the relative compare for line 199.
-- **Line 199**: blank rendering → 42-line letterbox window; flip ExRAM to
-  mode %10 (CPU-writable while blanked); push 10 columns.
-- **NMI (241)**: OAM DMA first, push three more columns in the synthetic build
-  or two in E1M1, restore gameplay CHR/palettes, ExAttr mode, scroll, and
-  rendering, then re-arm IRQ (mandatory: in-frame detection stops while
-  blanked, so NMI is the only guaranteed wake-up).
-
-Measured push cost: **~410 cycles per column** (20 NT bytes via $2007
-increment-32 + 20 ExRAM absolute stores, fully unrolled per column, two 8KB
-code banks of generated pushers dispatched through a bank-top JMP table).
-The synthetic quota can transfer a complete buffer in **2.49 frames** at 13
-columns/frame; E1M1's 12-column quota has an approximately 2.7-frame transfer
-floor. These are bandwidth limits, not current end-to-end frame rates: M3
-publishes 100 flips in 600 frames (6.00 frames/flip), and the trimmed E1M1 test
-publishes 73 in 700 (9.59 frames/flip), because composition is slower than the
-pusher. Letterbox blank timing remains at scanline 199; the seam is black.
-
-## Renderer cost (measured, micro-map: 3 sectors, 25 segs, 5 BSP nodes)
-
-| Vantage | Scene | Render pass |
-|---|---|---|
-| Room center, portal + walls | solid + portal composite | 6 frames (10 fps) |
-| Facing pillar (occlusion) | near solid wall dominates | 4 frames (15 fps) |
-| Down corridor into far room | 2 portals, floor step, far wall | 5 frames (12 fps) |
-| Deep room looking back | portal lintel + corridor | 7 frames (8.6 fps) |
-
-The flat-room renderer (M4, no BSP) measured 3 frames/pass; the render pass,
-not push bandwidth, is now the bottleneck. Per-column work is Doom's shape:
-1/z (rzh = 524288/z, from a 1KB reciprocal table) interpolates linearly in
-screen x, and per-seg height terms (h·rzh≫15) interpolate the same way — so
-each column costs only adds, table lookups, and the emit loop; all multiplies
-(camera rotate, projection, steps: ~20 per seg) run on the MMC5 multiplier
-($5205/$5206, instant 8×8→16; a signed 16×16 costs ~130–160 cycles vs ~500
-in software).
-
-## MMC5 feature scorecard
-
-| Feature | Role | Verified |
-|---|---|---|
-| ExAttr per-tile bank+palette | the entire rendering model | M2: bank bits, palette bits, both write paths |
-| $5130 upper bits | per-level 256KB texture windows | M2: displayed tiles change with $5130 |
-| ExRAM write timing | mode %10 during blank / %01 during render | M2: both land identically (emulator) |
-| Scanline IRQ | status split + letterbox bandwidth | M1/M3: exact line, every frame |
-| Multiplier | all projection math | M4/M5 renders correct geometry |
-| PRG-RAM ($5113) | double compose buffers (2×1280B) + scratch | M3+ |
-| 128KB PRG + 1MB CHR | code/map/audio + pre-rendered slices and sprites | build/link map |
-
-**Hardware caveats.** (1) In Mesen, blanking mid-frame freezes the MMC5
-scanline counter at the compare value and the pending flag re-asserts after
-every ack — an IRQ storm. Disabling the IRQ in the last handler of the frame
-(NMI re-enables) fixes it and is correct practice regardless; hardware
-behavior should be confirmed on a cart. (2) The mode-%10 ExRAM write
-workaround is documented on nesdev but flagged "test on hardware." (3) No
-commercial MMC5 board shipped 1MB CHR-ROM (ETROM/EWROM top out at 128KB);
-the ROM is NES 2.0-legal but real hardware means a custom board.
-
-## Honest limitations at this stage
-
-- Sprites work, but the PPU still permits only eight sprites per scanline. The
-  software composer enforces that limit, uses six static 1KB world pages, and
-  reserves two pages for the active weapon frame. The current full map is
-  deliberately capped at six monsters.
-- The sprite atlas is full. Stimpack, medikit, armor, ammo, shell, shotgun, and
-  imp kinds use explicit existing-art aliases; the imp currently shares the
-  zombieman's art and compact behavior. The shotgun acts as shell ammunition
-  until weapon switching exists.
-- Enemy pursuit is collision-tested but has no pathfinding. Monsters stop at
-  walls and closed doors rather than navigating around them.
-- Texture u is perspective-corrected in eight-column chunks. Residual affine
-  drift within a chunk stays below the baked phase quantum. Spans over 20 rows
-  pixel-double vertically instead of cropping.
-- Floors and ceilings are palette-colored rather than texture-mapped spans.
-  NUKAGE receives green floor ramps, but there is no sky renderer yet.
-- Eye height is fixed relative to the current mutable sector floor.
-- Node and subsector indices remain bytes; that is sufficient for E1M1 but not
-  a general guarantee for larger maps.
-- The NES 2.0 ROM requires 1MB CHR-ROM on MMC5. No historical MMC5 board offered
-  that combination, so physical execution requires a custom cartridge.
-
-## Scaling estimates to "real" content
-
-Full E1M1 demonstrates that scene cost, not nominal map size, is decisive.
-Enclosed views complete in 2–7 video frames, while broad hangar views have
-historically taken up to 20. The latest full-map regression bounds the start
-view to at most 30 frames and reports 14 frames in the southern view with all
-six monsters active. The practical envelope is therefore about **3–15 fps**,
-with simple enclosed views reaching 30 fps.
-
-Capacity remains adequate but placement is no longer abstractly "enormous."
-The linked full cartridge uses 72,561 of 131,072 PRG-ROM bytes. Its generated
-CHR prefix/highest allocated extent is 536,576 of 1,048,576 bytes, including
-large zero-padded holes between windows. Bank-local pressure is tighter: main
-code has 348 bytes free, fixed code 875, music 207, and the first full-map seg
-bank only eight. WRAM bank 0 reserves about 6,460 of 8,192 bytes. Three PRG
-banks and three advertised WRAM banks remain wholly unused; see
-`doc/memory-budgets.md`.
-
-## Real WAD content: E1M1 (added 2026-07-13, second session)
-
-A full WAD pipeline builds `nesdoom-e1m1.nes` and
-`nesdoom-e1m1-full.nes` from the checked-in shareware `Doom1.WAD`:
-
-- **tools/wadlib.py** parses the WAD (lumps, TEXTURE1/PNAMES patch
-  composition, PLAYPAL, REJECT).
-- **tools/mapconv.py --wad** converts E1M1's own BSP: rescale x0.4 (s11.4
-  range), split segs > 255 texels, trim by sector-BFS from the player start
-  to an 8KB bank budget (kept 26/85 sectors, 77/237 subsectors, 255 segs,
-  76 nodes), splice the BSP over kept leaves, solidify cut-boundary portals,
-  select the top-15 wall textures, carry seg u-offsets + upper/lower
-  textures, translate the REJECT matrix.
-- **tools/tilegen.py --wad** composes each texture from patches, quantizes
-  to 3 luminance bins, and prescales 12,964 slice tiles (244KB CHR).
-
-Engine growth this required: signed sector heights with a per-frame eye
-(floor of the camera's BSP-located sector + 41u), vertex-table seg records
-with texture u-offsets and separate lower textures, 16-byte BSP nodes with
-subtree bboxes, and a three-plane (behind/left/right frustum) bbox cull run
-per node and — tighter — per subsector, plus early backface rejection from
-raw deltas (2 multiplies) and z-first transforms.
-
-**Measured on E1M1** (Mesen2, before angle clipping): enclosed views 6
-frames/pass (10 fps); mid views 20-22; the worst case — the start-point
-panorama down the whole hangar — 32 frames (~1.9 fps). Profiling showed
-~2,200 hardware multiplies per pass, dominated by segs inside the frustum
-but occluded by nearer walls (occlusion tested only after
-transform+projection) and by the 6-multiply half-plane bbox cull.
-
-## Angle-based clipping (R_AddLine / R_CheckBBox port, third session)
-
-Doom's trick, now implemented: reject backfacing / off-frustum / occluded
-geometry using only BAM angles, before any transform multiplies.
-
-- **Table-driven atan2** (`atan2_hi`): fold into the first octant, normalize
-  both magnitudes, subtract compact Q4 log2 mantissas, then look up
-  `atan(2^-difference)` in 230 bytes of LUT01 tables. Accuracy is within one
-  BAM-high unit of ideal; the C-flag requests an exact-path fallback when
-  both deltas are below 16 world units.
-- **Per-vertex angle cache**: segs share vertices, so `vert_angle` memoizes
-  low indices in a 256-entry generation cache. Full maps add a tagged
-  eight-entry side cache for 16-bit vertex indices; current full-map seg
-  ordering yields roughly 51% high-endpoint reuse without slowing the common
-  low-index path.
-- **Seg angle gate in do_seg**: span = a1-a2 classifies winding with ±4
-  slack — 133..251 certain backface (rejected, zero multiplies), 124..132
-  is the wall-hugging wrap zone (true span ~180 deg, clip arithmetic
-  invalid -> exact path), small spans normalize order and run Doom's
-  R_AddLine tspan frustum clips, then an occlusion scan of the column
-  range (angle -> column via `angcol_tbl`, ±2 column slack) against the
-  per-column clip state. Certain-front spans (5..123) also skip the
-  2-multiply exact backface test.
-- **bbox_cull is now R_CheckBBox**: camera-region table (9 cases) picks
-  the box's two silhouette corners (expanded 1 page outward — converter
-  bboxes are floor-truncated), `atan2_pg` computes their angles from PAGE
-  deltas via `recip_col` (two raw 8x8 MMC5 products, no mul16 calls), then
-  the same frustum + occlusion-scan logic. This culls whole subtrees
-  behind already-solid columns — the old dot-product cull could only
-  reject off-frustum boxes. Keeps (never culls) when the camera is inside
-  the box, within 4 pages, or the box subtends >= 124 units (~175 deg).
-
-**Measured after** (same E1M1 vantages): start panorama 32 -> 20
-frames/pass (3.0 fps), enclosed 6 -> 2 (30 fps), mid views 14-20 -> 5-13;
-M5 micro-map worst 7 -> 6. Start-view multiplies 2,188 -> 1,014; do_seg
-calls 173 -> 111 (occluded subtrees no longer descend). Verified
-pixel-identical against the pre-clipping renderer at the start view plus a
-7-vantage interior sweep (screen-hash A/B in Mesen); the only diverging
-vantage is the deliberately degenerate e1m1.lua "near-wall" teleport,
-which clamps the camera to the world-min boundary looking out of the
-trimmed map — a void view where the drawn set legitimately depends on
-cull order (that test only asserts speed).
-
-Precision hazard worth recording: an early version classified spans 0..4
-as "ambiguous winding" and skipped the gate for them — but most segs in a
-real map subtend tiny angles from any distant vantage, so the gate never
-fired. Slack bands must wrap around the *certain* classifications
-(backface, wall-hugging), not around "front".
-
-Also fixed en route and worth recording: the MMC5 multiplier retains each
-factor register, so a 16x16 multiply can rewrite only one register per
-partial product (order al*bl, al*bh, ah*bh, ah*bl) — ~20 cycles saved per
-multiply, verified by geometry correctness in Mesen.
-
-**Data-driven palettes.** tilegen now derives the 4-light BG palette ramp
-from the actual texture colors: pixels are binned bright/mid/dark per
-texture; bin RGB means are accumulated chroma-weighted (so colorful pixels
-outvote gray mortar); each bin is pinned to a fixed NES luminance row
-(3/2/1) and only the hue column is matched, against the bin color scaled to
-the candidate's luminance. Raw nearest-color matching fails — Doom art is
-dark, everything lands in row 0 and the light ramp collapses to black.
-E1M1 derives {$37,$27,$18} (tan / orange-brown / olive), stepped one row
-darker per light level. The ROM loads BG palettes from the generated LUTs;
-only sprite palettes remain hardcoded.
-
-**Two-ramp split.** The 4 BG palettes are now 2 hue ramps x 2 light levels:
-tilegen clusters textures warm/cool by chroma-weighted warmth (E1M1: tan
-ramp for STARTAN/BROWN, gray ramp for TEK/COMP/DOOR), the per-texture ramp
-bit rides ExAttr palette bit 7 and light bit 6, carried per wall part
-(upper/lower can differ). Gray ramps use NES rows 2/1/0 because $30 and $20
-are the same white. Light = dark when sector light + distance >= 3.
-
-**Pixel-precise silhouettes (edge tiles).** Wall top/bottom boundaries no
-longer snap to 8px tile rows. The backdrop color IS the ceiling color
-(ceilings are blank tiles), so 14 shared edge tiles (k=1..7 wall pixels
-against ceiling color above / floor color below) can render the boundary
-under any wall palette. The per-seg height interpolators already carry
-sub-tile precision (acc bits 4-6); emit overwrites the flat row adjacent to
-each true (unclipped) wall boundary with edge[k]. Verified: an oblique wall's
-top edge steps k = 2,3,4,4,5,5,6,6 across columns — 1px silhouette steps for
-16 shared tiles and ~50 cycles/column. Edge rows are flat-shaded (the
-"cheap tier"); textured edge tiles (+128/texture, still 4 banks) remain the
-upgrade path. Portal inner boundaries (lintels/sills) stay tile-snapped by
-design — an edge tile there would paint over the portal's far content.
-
-**Palette-aware quantization (third session — the previously-noted
-"endgame", now in).** The ramp is chosen per SLICE, not per texture: the
-ramp bit rides bit 7 of each `slice_bank` LUT byte (banks stay < 64, bits
-6-7 free), so palette selection is per-8px-strip at zero runtime cost and
-the per-texture `tex_ramp` plumbing is gone. tilegen scores each strip's
-chroma-weighted bin means against both ramps — luminance-SCALED before
-comparing, the same trick as ramp derivation, because raw nearest-RGB
-matching collapses dark Doom art onto whichever ramp is darkest (tried it:
-the whole map went gray). Pixels still bin by the texture's global
-luminance thresholds (keeps relative contrast), with a 2x2 ordered dither
-in a ±30%-of-bin band around each threshold. Result: STARTAN walls carry
-warm tan strips and cool gray computer-panel strips side by side.
-
-Refinements after first playtesting (same session):
-
-- **Ramp coherence.** Independent per-strip argmin made near-tie strips
-  flip ramps randomly — walls striped. Now the texture's majority ramp
-  wins unless a strip prefers the other by a wide margin (< 0.55x error).
-  Ramp stays per (texture, phase) across all height classes, so a wall
-  section never changes ramp on approach.
-- **Box-filtered sampling.** Both decimations were nearest-neighbor (WAD
-  compose -> 64x64 point sample; 64 rows -> class height by row-dropping),
-  which aliased thin details away and turned distant classes into noise.
-  Both steps now area-average in RGB (`box_resample`), and quantization +
-  dither run at final class resolution (`quantize_rows`), so the dither
-  pattern can't moire through a rescale. The --game synthetic textures
-  keep the old index-map path.
-- **Row-lit floors.** First attempt gave floors the wall column's light
-  bit (`emit_lt`) — floor shading banded vertically wherever wall segs
-  changed depth, which reads as nonsense. Floor depth is a function of
-  screen ROW for a fixed eye height (z = 656/(row-10)), so the light now
-  comes from a 4-entry per-sector threshold table (`fl_thr_tbl`, sector
-  light -> first bright row; ~8 cycles/row): a smooth horizontal fade to
-  dark at the horizon, constant per sector. Sectors whose floor sits far
-  below the eye shift the true bands; the fixed table ignores that.
-
-## Close-range magnification (fourth session)
-
-Slices bake horizontal texture at a fixed 1 texel/px, but vertical scale
-grows with the height class — at class 16 a wall is 0.5 texel/px
-vertically. Up close the axes disagree: u advances < 8 texels per column,
-so phases repeat and the wall reads as the same 8-texel strip stamped at
-column frequency ("texture repeats faster as you approach"). Two more
-close-range bugs stacked on top: row offsets clamped at ±30 rows, so
-nearer than that the texture's vertical anchor saturated and the texture
-visibly slid; and spans > 20 rows clamp to class 20 with the row offset
-pinned to the last slice row — the bottom of near walls smeared one texel
-row. Fixes:
-
-- **2x-zoom slice sets** for classes 12/14/16/20: 4 texels per column
-  stretched to 8 px, 16 phases (4-texel granularity), matching those
-  classes' vertical magnification. `set_slice` picks phase (u>>10)&15 via
-  a per-class LUT base offset table; zoomed slices inherit the parent
-  8-texel strip's palette ramp. Cost: 1360 tiles = 6 CHR banks per texture
-  (ExAttr bank field is 6 bits = 64 banks per frame window), so texture
-  slots drop 15 -> 10 (mapconv MAX_TEX; trim-local top-10 covers ~90% of
-  visible surfaces). FLAT_BANK stays 60 for E1M1; the --game build moves
-  to FLAT_BANK 12.
-- **Vertical pixel-doubling for spans > 20 rows** (`vshift`): halve the
-  span until a class fits and shift the emit row offset right by the same
-  amount — the texture covers the whole wall in blocky 2x/4x rows instead
-  of smearing its last row, and pairs with the horizontal zoom so both
-  axes magnify together.
-- **clamp30 -> clamp60** on the per-column row offsets: covers every
-  reachable span (near clip at 16 units caps full walls at ~51 rows), so
-  the vertical anchor no longer saturates and slides.
-- **Ramp fixes**: isolated-deviant smoothing (a strip flanked by two
-  majority-ramp strips reverts) on top of the majority-margin rule, and
-  `ramp_base` now picks ONE hue column for a whole ramp (summed over the
-  three bins) — per-row independent matching had produced incoherent
-  ramps like yellow/gray/black. E1M1 derives tan {37,27,17} + gray
-  {20,10,00}.
-
-- **Dissolve lighting.** With coherent textures, the hard 2-level
-  distance-light step read as a vertical band across long walls. Per-seg
-  light does not fix it (mapconv splits long walls at ~255 texels, so the
-  step lands mid-wall anyway — tried and reverted). Instead `light2_tbl`
-  doubles the distance-light resolution (7 values); dark at >= 6, and the
-  half-band at exactly 5 dissolves by column parity. The floor fade
-  boundary row dithers the same way. One light bit is the hard limit
-  here; the remaining lever is trading the second hue ramp for 4 light
-  levels (4 palettes = 1 ramp x 4 lights) if diminishing ever matters
-  more than hue variety.
-
-Measured: pass-frame envelopes essentially unchanged (M5 worst 7, E1M1
-start 20, near-wall 2). Close walls now show the texture at the correct
-scale with no repetition, sliding, or smear; light transitions read as
-dissolves instead of bands.
-
-**Isotropic slice widths (fifth session).** The 2x-zoom classes fixed
-magnification but far classes still baked 8 texels/column while their
-isotropic width is 64/h — distant walls sampled every Nth strip and
-phase-crawled under motion. Every class now bakes at the power-of-2 texel
-width nearest 64/h (CLASS_TW: class 1 -> 64, 2-3 -> 32, 4-7 -> 16,
-8-10 -> 8, 12-20 -> 4), box-filtered at bake = proper mips, so distance
-sampling is pre-filtered and stable. Phase counts scale with width
-(64/tw), so set_slice is table-driven (class_pshift/class_pmask/
-class_base_tbl, phase = (u >> shift) & mask). Fewer phases for far
-classes more than pay for the zoom slices: 1,235 tiles = 5 banks per
-texture -> 12 texture slots (12 x 5 = 60, FLAT_BANK unchanged).
-One subtlety: box filtering compresses luminance toward the mean, and
-quantizing minified slices with the texture-global thresholds flattens
-them — thresholds are re-derived per (texture, class) from the filtered
-pixels so every scale keeps its thirds.
-
-**Perspective-u anchoring + palette stability (same session).** The
-8-column resync had a granularity flaw: between divisions u ran on the
-whole-seg affine slope, then SNAPPED to the exact value at each anchor — a
-phase pop marching across strong-perspective walls in motion. `chunk_u`
-now divides twice per chunk (current column + interpolants advanced 8
-columns) and sets the chunk slope to land exactly on the next anchor: u is
-continuous piecewise-linear through exact points, nothing snaps. Seg
-tails (< 8 columns left) get exact per-column divisions. Two more palette
-stabilizers: ramp bits are constant over 16-texel blocks (pair-agreed or
-texture-majority), so every class with tw <= 16 sees identical ramp
-boundaries and palette regions stay put through class transitions (wider
-far slices take the majority); and the light-dissolve dither keys on a
-texture-u bit instead of screen column parity, so it is anchored to the
-wall surface and no longer shimmers when the camera moves.
-
-**Thin geometry (same session).** Zero-column spans were rejected at
-projection, so sub-column segs — thin pillars, edge-on walls — blinked
-out of existence. The projection already computes 1/8-column fractional
-positions (the 3 bits shift3_cx discards); they are now captured
-(frac1/frac2), and a span-0 seg with any fractional width claims its
-single column (cx2 += 1 and the normal 1-column path runs). Contiguous
-walls cannot double-draw (the column clip closes after the first paint);
-freestanding thin geometry stays visible instead of popping.
-
-**Sub-row walls no longer vanish (pop-in fix).** A wall whose screen span
-rounds to zero rows used to emit nothing — distant steps and lintels
-popped into existence on approach. But the boundary interpolators already
-carry sub-tile fractions: a zero-row wall is exactly ek_top pixels above
-the row line plus ek_bot pixels below it, which is what the shared edge
-tiles render. The fix is three tiny emit-path branches that arm
-`emit_edges` (ew_top/ew_bot) for zero-span solid walls, zero-span upper
-portal walls, and zero-span lower walls (stair edges — the common case),
-with exbyte carrying the light bits. Distant geometry now fades in as a
-1-7px line instead of appearing from nothing; same pass-frame cost.
-
-**Perspective-correct texture u (chunked resync).** u/z is linear in
-screen x, and the per-column rzh (∝1/z) interpolant already exists — so
-do_seg now also carries uoz = u·rzh/256 (16-bit, two extra multiplies per
-seg for the endpoints + one for the step). Every 8th drawn column,
-`resync_u` re-anchors the affine u accumulator with the exact
-u = (uoz << 16)/rzh — a 16-step restoring division, ~420 cycles. The
-quotient provably fits 16 bits: u < 256 texels ⇒ uoz < rzh at both
-endpoints, and both interpolate linearly, so the invariant holds at every
-column. Gated to spans > 8 columns (narrow spans can't drift a visible
-amount) and to segs whose u range doesn't wrap 256 texels (u interpolates
-mod 256 texels; a wrap makes uoz a sawtooth, not a line — those keep
-affine). Measured: zero pass-frame cost on every test vantage; visually,
-grazing views of long walls now compress texture detail toward the far
-end instead of smearing it evenly (affine's classic swim). The between-
-anchor error is bounded by 8 columns of drift, under one 8-texel phase in
-practice.
-
-**Sub-row texture anchoring (same session).** The biggest remaining
-texture motion was per-column vertical misalignment: each column's texture
-v=0 pinned to its SNAPPED top row, discarding the sub-row fraction (up to
-7px) that the edge tiles already compute (ek_top). Adjacent columns on a
-sloped wall carried up to half a row of relative vertical offset, sliding
-through row boundaries at different times as the camera moved — crawling,
-ragged horizontal texture lines. The texture row offset now rounds by the
-boundary fraction (eob += ek_top>>2 for solid/upper walls; lower walls
-subtract the back-floor fraction bit), and emit_wall_run clamps a possible
--1 first row. Horizontal features now run continuous across columns.
-What remains is the static class-scale seam: adjacent columns in
-different height classes stretch the texture vertically by different
-factors (worst gap 16->20 = 18%); that is the quantization lattice itself
-and only more classes (CHR cost: class 18 alone = 288 tiles = a bank)
-would reduce it.
-
-**Timing landmine worth recording:** the M3 IRQ-phase assertion is
-ONE-CYCLE sensitive to main-thread composer timing. A per-row branch in
-emit_wall_run (taken vs not) phase-locked ~16% of frames into reading the
-IRQ scanline as 159/198 instead of 160/199 — the mid-frame-blank MMC5
-counter caveat interacting with handler-entry jitter. Emit-path additions
-must be constant-time (the anchor rounding is branchless lsr/adc, plus
-one timing-pad nop in emit_wall_run); if M3 starts failing with "missing
-IRQ phases" after a renderer edit, suspect timing variance, not the IRQ
-code.
-
-## Status bar (sixth session)
-
-The HUD uses a 125-tile deduplicated STBAR/STARMS and numeric-glyph bank at
-physical bank 125. Ammo and armor are right-aligned one tile farther left
-than the original pass; health remains centered. Physical bank 127 holds
-thirteen fixed 4x4 face frames: five health tiers, five damage reactions,
-two healthy idle alternates, and death. Every face cell uses HUD-window bank
-63 and the flesh palette, so animation is four short nametable runs with no
-CHR or ExRAM upload and no palette fringe changes. NMI updates the face from
-health and committed damage events, keeps pain for 60 video frames, cycles
-healthy idle every 30, and gives death unconditional priority. Numeric and
-face uploads serialize and sacrifice that NMI's viewport-column quota to
-stay inside measured vblank timing.
-
-## Palette game: 8 palettes per frame + per-sector sets (seventh session)
-
-The "full palette" PPU quirk (rendering disabled => the raster displays the
-palette entry the VRAM address points at; ahefner's 410-color demo) cuts
-both ways: it means palettes can only change while blanked, and the writes
-themselves paint a visible sweep. Both blank windows we already own now
-carry palette work:
-
-- **Line-160 IRQ**: blank ~2 lines, stream 16 bytes -> the status bar gets
-  its OWN 4 palettes (gray panel, STTNUM red digits, flesh face, gold
-  accents — all 16 animated face cells are fixed to the flesh palette so
-  hair and background fringes cannot grab gray or olive). The
-  sweep smear is confined to a thin divider line the HUD art keeps black.
-  Hardware gotcha: the mid-frame blank CLEARS MMC5 in-frame detection and
-  the scanline counter restarts from zero at unblank, so phase 1 arms a
-  RELATIVE compare (SPLIT2_CMP = 36, measured to land the letterbox at
-  line 199). Probed: IRQs at 160/199 every frame.
-- **NMI (vblank)**: loads the camera sector's 16-byte palette set every
-  frame (pal_ptr = sec_pal + cam_sec*16, set by render_frame) — which is
-  simultaneously the restore from the HUD set and the mechanism for
-  **per-sector wall palettes**: mapconv records per-sector texture usage,
-  tilegen derives each sector's own warm/cool ramp pair from its textures'
-  chroma-weighted bins. Rooms get individual hues; quantization stays
-  luminance-binned with hue purely in the palette, so the recolor is
-  coherent (Doom-colormap style). NMI_QUOTA drops 3 -> 2 on E1M1 to pay
-  for the load (~210 cycles); flips 2.49 -> ~2.7 frames.
-- Backdrop formalized BLACK ($0F): the boot value ($00 gray) never
-  actually displayed before, and the per-frame load made the entry
-  authoritative — first build showed gray ceilings until corrected.
-
-Net: 8 effective BG palettes per frame, per-room hue variation, and
-per-frame dynamic palettes (damage flash, light flicker) now free.
-
-**Four-level walls (same session).** Answering "why aren't we using all
-palette entries": wall pixels only used colors 1-3 — but BG color 0 is
-not transparency, it renders the backdrop COLOR, and the backdrop is
-black: a free fourth ramp level. Quantization is now 4 luminance bins
-(25/50/75 percentiles, re-derived per class): bright/mid/dark ramp colors
-plus black for the darkest quartile, dither at all three boundaries.
-+33% tonal depth for zero CHR and zero runtime. The remaining "unused"
-entries are the light-pair overlap (light-1 palettes share two rows with
-their bright pair) — that overlap IS the 1-bit runtime dimming mechanism;
-unique colors per wall set are ~8 of 13 by design.
-
-## Ceiling check: CHR-RAM, and what headroom remains (seventh session)
-
-Asked directly: is the technique maxed out, and would CHR-RAM runtime
-geometry beat it? **CHR-RAM framebuffer loses by ~20x**: a full screen is
-10,240 bytes of pattern data against a measured push budget of ~700-800
-bytes/frame (13+ frames per flip), and software pixel rasterization on the
-6502 runs >= 15-20 cycles/pixel = 25-30 frames per render pass — combined
-~1.5 fps against the current 3-30. That wall is why tokumaru pre-rendered
-and Elite shipped PAL-only; writing tile indices instead of pixels is the
-project's entire viability, and the quantization artifacts are that
-trade's price. (A hybrid — runtime-composited boundary tiles in a small
-CHR-RAM window on a custom board — is bandwidth-plausible at ~1KB/frame
-but competes with column pushes and has thin emulator support; the sloped
-edge tiles below buy most of the same effect from ROM.)
-
-Headroom that did remain, both landed this session:
-
-- **Sloped silhouette tiles (bank 62).** Boundary tiles now ramp the wall
-  edge linearly from this column's sub-row fraction to the next column's
-  (128 precomputed tiles: 64 top a->b + 64 bottom, a,b in 0..7; clamped
-  7/0 when the boundary exits the row). The 8px silhouette stairstep on
-  sloped wall tops/bottoms becomes a near-pixel diagonal. Zero bandwidth,
-  ~15 extra cycles per boundary tile. The --game build keeps the old flat
-  edge tiles.
-- **Per-texture height-class pruning.** A wall part's max screen span is
-  bounded by its world height (span = 16h/z, near clip z=16 => span_max =
-  h units), so mapconv tracks each texture's max part height, converts it
-  through the engine's vshift reduction to a max reachable class (+1
-  margin), and texture selection becomes bank-budget-driven. tilegen bakes
-  only reachable classes and packs variable-size textures sequentially.
-  Base slices reserve banks 0-42, half-row variants 43-59, and flats/HUD/edges
-  remain fixed at 60/61/62. Full E1M1 now fills **16 texture slots**; missing
-  source textures use explicit converter substitutions.
-
-Still on the table, costed: class 18 (halves the worst vertical rescale
-seam, ~1-2 slots after pruning) and dithered floor-shade tiles (cheap).
-
-## Music
-
-The WAD build compiles `D_E1M1` from MUS timing into bounded 60 Hz hardware
-commands. Its two polyphonic guitar tracks use the two base and two MMC5 pulse
-channels, bass uses triangle, and all percussion uses short long-LFSR noise
-hits. The complete 96-second loop, period/volume tables, and percussion recipes
-occupy 7,985 bytes in PRG08. Runtime playback performs no
-voice allocation or pitch math and processes at most six channel updates per
-frame. Gameplay noise effects retain priority without interrupting tonal music.
-
-## Full-map gameplay integration (eighth session)
-
-The full target now converts and initializes the complete medium-skill E1M1
-gameplay payload: 533 vertices, 816 segs, 237 subsectors, 236 nodes, 85 sectors,
-and 64 runtime things. Four zombiemen and two imp-kind actors pursue and attack;
-health, armor, ammunition, barrels, explosions, deaths, pickups, and the HUD are
-persistent mutable state rather than render-only decoration.
-
-**World collision and specials.** Player movement uses a 6.4375-unit circle
-against one-sided segs, explicitly impassable two-sided lines, openings with
-insufficient height or excessive steps, and non-passable dynamic doors. It
-scans both the old and candidate BSP leaves. Doors animate through mutable
-ceiling heights. The E1M1 lift uses a mutable floor shadow, requires a true
-movement-side transition across its linedef, lowers, waits, raises, and changes
-passability with its floor. Using the exit switch plays its report and returns
-to TITLEPIC.
-
-**Pickups and bank invariants.** Pickup collision scans all active runtime
-things after movement with a 16-unit radial test. An intermittent full-map miss
-was traced to successful point location leaving `$A000` mapped to `MAPGEOM`;
-post-movement simulation then interpreted geometry bytes as thing metadata.
-`render_frame` now restores `MAP_COMMON_BANK` immediately after `update_cam`.
-This fixed moving-through-item misses and also prevented expiration logic from
-clearing unrelated active bits. M15 walks completely through thing 63 while
-holding movement and verifies one reward, one active-bit clear, and no collateral
-state changes.
-
-**Enemy walls and sight.** The first LOS implementation sampled sixteen points
-with only a two-unit collision radius, allowing consecutive samples to land
-on opposite sides of a thin wall. The trace now uses a six-unit radius, whose
-12-unit diameter overlaps the maximum 11.31-unit diagonal sample spacing at the
-128-unit attack-range limit. Enemy pursuit is also collision-tested in one-unit
-axis steps. Its fast path scans the current convex leaf; after a portal crossing
-it validates the candidate circle against the new leaf so corners and jambs
-remain solid. This keeps the full-map regression responsive (14 frames in the
-southern view with six monsters), whereas using the full two-leaf player query
-for every actor exposed a 28-frame zero-render-progress interval. There is still
-no route finding: a blocked actor stops.
-
-**Audio.** Tonal music stays on the four pulse channels plus triangle. DPCM was
-removed; percussion and gameplay reports share long-LFSR noise. Pickup, door,
-empty weapon, pistol, pain, enemy, explosion, and exit reports have explicit
-priorities, and a held high-priority report cannot be preempted by any lower
-intermediate level.
-
-**Regression status.** `make test` passes 25 Python tests plus M1–M15. Coverage
-now includes boot/IRQ timing, ExAttr, bandwidth, BSP rendering, collision,
-sprites, pickups, combat, title, music, doors, animated face HUD, moving pickup
-banking, static and dynamic-door LOS, collision-aware pursuit, lift state, and
-exit-to-title behavior. Full-map rendering remains within its 30-frame start
-budget; the latest southern run reports `pass_frames=14`.
-
-## Build and release automation
-
-`Doom1.WAD` is checked in as the 4,196,020-byte shareware IWAD (SHA-256
-`bb449c7480e9a02a62012d041406e8e43daa51caa0650646d1307d8650b8f837`).
-`.github/workflows/build.yml` installs cc65 on Ubuntu, runs the portable Python
-suite, builds `nesdoom-e1m1-full.nes`, and uploads it as the
-`nes-doom-e1m1-full` Actions artifact on `master` pushes, pull requests, and
-manual dispatches. An ordinary branch push intentionally skips release
-publication. Tags matching `v*` run the release job, which creates a new GitHub
-release or replaces the ROM asset on an existing one, attaching the exact ROM
-produced by the build job. The first hosted build completed successfully.
-
-## Profiling harness (notes)
-
-Mesen2's lua `emu.addMemoryCallback(fn, emu.callbackType.exec, addr)`
-counts routine entries between two `render_bsp` entries = exactly one
-render pass; `emu.getState()["cpu.cycleCount"]` brackets the cycles.
-Addresses come from the ld65 `--dbgfile` (grep `sym.*name="mul16u"` etc).
-The zp profiling counters ($80-$82) are reset per pass, so lua reads at a
-fixed frame catch them mid-pass — only `pass_frames` ($80, written at pass
-end) is trustworthy there. The testrunner lua sandbox has no `io`/`os`:
-export screens by printing FNV hashes (or hex pixel rows) to stdout.
-
-## Repro
-
-```
-make            # builds nesdoom.nes (micro-map PoC) + nesdoom-m2.nes
-make e1m1       # builds the trimmed E1M1 cartridge
-make e1m1-full  # builds the complete E1M1 cartridge used by CI/releases
-make test       # 25 Python checks plus M1..M15 in Mesen2 headless testrunner
-make test-e1m1  # E1M1 structural + performance-envelope test
-```
-
-Push a version tag such as `v0.1.0` to run the tag-only GitHub release job.
-
-ROMs: 1,179,664 bytes each (16B header + 128KB PRG + 1MB CHR), mapper 5, NES 2.0.
+| MMC5 extended attributes | Per-cell CHR bank and palette selection across a large wall atlas |
+| Pre-rendered wall slices | Bounded runtime work expressed as tile and attribute writes |
+| BSP front-to-back traversal | Early visibility ordering and solid-column closure |
+| Angle and bbox gates | Geometry rejection before transform and projection work |
+| Double-buffered compose surfaces | Stable publication independent of render-pass duration |
+| IRQ and NMI transfer schedule | Predictable column bandwidth across each video frame |
+| Height and texture-phase quantization | Finite CHR vocabulary for continuous world geometry |
+| Isotropic class mips | Stable texture scale and filtering across depth |
+| Eight-column perspective anchors | Perspective texture compression with bounded division cost |
+| Sloped boundary tiles | Pixel-scale wall silhouettes within an 8-pixel column renderer |
+| Per-sector palette sets | Room-specific color identity through palette data |
+| Four luminance bins | Tonal depth from every background palette entry |
+| Surface-anchored dissolve | Stable half-step distance lighting during camera movement |
+| Banked map and code segments | Full-map capacity with resident interrupt paths |
+
+## Status
+
+| Area | Current state |
+|---|---|
+| Playable content | Complete medium-skill E1M1 layout and implemented world interactions |
+| Render rate | 3-15 fps practical range; enclosed views reach 30 fps |
+| Geometry | BSP sectors, portals, variable floors and ceilings, arbitrary wall angles |
+| Rendering | Textured walls, per-column occlusion, sprites, distance lighting, sector palettes |
+| Gameplay | Collision, weapons, monsters, pickups, barrels, doors, lift, exit |
+| Presentation | Title screen, status bar, animated face, music, prioritized sound effects |
+| Verification | 25 Python tests and Mesen2 milestones M1-M15 |
+
+## Content Profile
+
+| Resource | Full E1M1 |
+|---|---:|
+| Vertices | 533 |
+| Segs | 816 |
+| Subsectors | 237 |
+| BSP nodes | 236 |
+| Sectors | 85 |
+| Runtime things | 64 |
+| Active monsters | 6 |
+| Doors | 4 |
+| Lifts | 1 |
+| Exits | 1 |
+| Wall texture slots | 16 |
+
+| Trimmed geometry | Count |
+|---|---:|
+| Sectors | 26 |
+| Subsectors | 77 |
+| Segs | 255 |
+| BSP nodes | 76 |
+
+## Rendering Model
+
+### Output
+
+| Property | Value |
+|---|---|
+| Viewport | 256 x 160 pixels |
+| Tile grid | 32 x 20 cells |
+| Compose format | One nametable byte and one ExAttr byte per cell |
+| Compose buffers | Two 1,280-byte WRAM buffers |
+| Wall source | Build-time CHR slice atlas |
+| Runtime publication | Column transfers during the letterbox and vblank windows |
+
+### Quantization
+
+| Parameter | Representation |
+|---|---|
+| Column width | 8 pixels |
+| Wall heights | 1-10, 12, 14, 16, and 20 tile classes |
+| Near-wall scale | Vertical pixel doubling above 20 rows |
+| Texture width | 64, 32, 16, 8, or 4 texels per column by height class |
+| Texture phase count | 64 divided by class texel width |
+| Horizontal perspective | Exact anchors every eight columns; exact tails |
+| Vertical placement | Sub-row texture anchoring |
+| Wall boundaries | 128 sloped silhouette tiles with 1-pixel endpoint precision |
+| Wall color | Four luminance bins, including the black backdrop |
+| Palette model | Two hue ramps by two light levels |
+| Distance transition | Surface-anchored half-step dissolve |
+| Floor lighting | Sector light plus row-based distance thresholds |
+
+### Visibility And Projection
+
+| Stage | Implementation |
+|---|---|
+| Traversal | Front-to-back BSP |
+| Seg gate | BAM angle span, frustum clip, and column-occlusion scan |
+| Node gate | `R_CheckBBox`-style silhouette-corner test |
+| Backface handling | Angle classification with exact-path fallback |
+| Projection | Endpoint reciprocal depth and linear screen-space interpolation |
+| Wall heights | Endpoint height terms interpolated per column |
+| Texture coordinates | Piecewise perspective-correct `u/z` interpolation |
+| Portal handling | Upper and lower wall parts with per-column clips |
+| Thin geometry | Fractional column coverage for sub-column spans |
+| Distant geometry | Sub-row edge coverage for zero-row spans |
+| Arithmetic | MMC5 8x8 multiplier, reciprocal tables, compact log/atan tables |
+| Vertex reuse | 256-entry generation cache plus tagged high-index side cache |
+
+### Surfaces And Sprites
+
+| Element | Representation |
+|---|---|
+| Walls | Mip-filtered texture slices |
+| Floors | Sector palette color with row lighting |
+| Ceilings | Sector backdrop color |
+| World sprites | Six 1 KiB pattern pages |
+| Weapon sprites | Two 1 KiB pattern pages selected per frame |
+| Sprite density | Eight sprites per scanline |
+| World atlas | 188 patterns and 227 cells |
+| Weapon frames | Four generated frames |
+
+## Frame Schedule
+
+| Phase | Work |
+|---|---|
+| Lines 0-159 | 3D view |
+| Line 160 | HUD CHR window and palette load |
+| Lines 160-199 | Status bar |
+| Line 199 | Rendering blank and ExRAM CPU-write mode |
+| Lines 199-240 | Ten viewport-column transfers |
+| NMI | OAM DMA, two E1M1 viewport columns, gameplay palette restore, display state restore |
+
+| Transfer metric | Value |
+|---|---:|
+| Column payload | 20 nametable bytes and 20 ExRAM bytes |
+| Measured column cost | Approximately 410 CPU cycles |
+| E1M1 normal quota | 12 columns per video frame |
+| Synthetic normal quota | 13 columns per video frame |
+| E1M1 publication floor | Approximately 2.7 video frames |
+| Synthetic publication floor | 2.49 video frames |
+| HUD update quota | Face or numeric upload uses the NMI column allocation for that frame |
+
+## Lighting And Palettes
+
+| Scope | Behavior |
+|---|---|
+| Gameplay | Four generated background palettes |
+| Status bar | Four dedicated background palettes |
+| Sector selection | Camera sector chooses the gameplay palette set |
+| Texture selection | Each slice carries its warm/cool ramp bit |
+| Light selection | ExAttr carries the bright/dark bit |
+| Ramp stability | Ramp regions align to 16-texel texture blocks |
+| Backdrop | `$0F` black |
+| Dynamic capacity | Per-frame gameplay palette load supports flashes and light effects |
+
+## Status Bar
+
+| Element | Implementation |
+|---|---|
+| Base art and digits | 125 deduplicated tiles in physical CHR bank 125 |
+| Face atlas | 13 fixed 4 x 4 frames in physical CHR bank 127 |
+| Face states | Five health tiers, five pain tiers, two healthy alternates, death |
+| Pain duration | 60 video frames |
+| Healthy idle period | 30 video frames |
+| Face palette | Fixed flesh palette across all 16 cells |
+| Animation transfer | Four 4-byte nametable runs |
+| Counters | Runtime ammo, health, and armor updates |
+
+## Gameplay
+
+### Player And World
+
+| System | Current behavior |
+|---|---|
+| Player collision | 6.4375-unit circle against BSP leaf geometry |
+| Portal clearance | Opening height, step height, line flags, and dynamic door state |
+| Movement query | Current and candidate BSP leaves |
+| Eye height | Fixed offset from the mutable sector floor |
+| Pickups | 16-unit radial scan over active things |
+| Doors | Use activation, opening, wait, closing, collision, and sound states |
+| Lift | Side-transition activation, lowering, wait, raising, and floor collision |
+| Exit | Use activation, report sound, and return to title |
+
+### Combat And Actors
+
+| System | Current behavior |
+|---|---|
+| Weapons | Pistol and shotgun-ammunition behavior |
+| Targets | Zombiemen, imp-kind actors, and barrels |
+| Monster movement | Direct collision-tested pursuit in one-unit axis steps |
+| Monster attacks | Range, timing, static-wall LOS, and dynamic-door LOS |
+| LOS sampling | Six-unit collision radius across bounded trace steps |
+| Damage state | Health, armor type, armor absorption, pain report, death |
+| Persistence | Thing health, deaths, explosions, pickups, and active flags |
+| Actor capacity | 64 things and 8 monster state slots |
+
+## Audio
+
+| Resource | Allocation |
+|---|---|
+| Guitar tracks | Two base pulse and two MMC5 pulse channels |
+| Bass | Triangle channel |
+| Percussion | Long-LFSR noise |
+| Gameplay reports | Prioritized noise events |
+| Music loop | 96 seconds |
+| Music data | 7,985 bytes in PRG08 |
+| Runtime command rate | Up to six channel updates per frame |
+
+## Performance
+
+| Scenario | Measured render pass |
+|---|---:|
+| Enclosed trimmed-map view | 2-3 frames |
+| Portal room and corridor micro-map | 4-7 frames |
+| Trimmed E1M1 start view | 19 frames |
+| Full E1M1 southern view with six monsters | 14 frames |
+| Full E1M1 start-view regression bound | 30 frames |
+
+| Throughput sample | Result |
+|---|---:|
+| Synthetic publication | 100 flips in 600 frames |
+| Trimmed E1M1 publication | 73 flips in 700 frames |
+
+## Operating Bounds
+
+| Resource | Bound |
+|---|---|
+| Wall textures | 16 map texture IDs |
+| Gameplay texture window | 64 physical 4 KiB banks |
+| BSP indices | Byte-sized nodes and subsectors |
+| Seg endpoints | 16-bit vertex indices in the full build |
+| Things | 64 runtime entries |
+| Monsters | 8 runtime state entries; full E1M1 activates 6 |
+| Sprite scanline load | 8 sprites |
+| Near clip | 16 world units |
+| Texture span | 256-texel modular `u` range per seg |
+| Physical implementation | Custom board layout with 1 MiB CHR capacity |
+| Timing qualification | Scanline-counter blanking and ExRAM write-mode checks on final hardware |
+| Resource placement | `doc/memory-budgets.md` |
+
+## Content Pipeline
+
+| Tool | Output |
+|---|---|
+| `tools/wadlib.py` | Lump access, texture composition, palette data, and REJECT data |
+| `tools/mapconv.py` | BSP geometry, sectors, things, specials, texture slots, and bank splits |
+| `tools/tilegen.py` | Wall slices, silhouettes, sprites, HUD, title, palettes, and LUTs |
+| `tools/musicgen.py` | 60 Hz channel command stream |
+| `tools/tablegen.py` | Math and projection lookup tables |
+
+## Verification
+
+| Coverage | Tests |
+|---|---|
+| Boot, IRQ, ExAttr, transfer timing | M1-M3 |
+| Wall and BSP rendering | M4-M5 |
+| Weapon sprites, HUD counters, combat | M6-M8 |
+| Enemies, title, music | M9-M11 |
+| Collision, doors, animated face | M12-M14 |
+| Full-map pickups, LOS, lift, exit | M15 |
+| Content generation | 25 Python tests |
+| Full-map structure and performance | `test/e1m1_full.lua` |
+
+### Commands
+
+| Command | Scope |
+|---|---|
+| `make` | Synthetic and M2 builds |
+| `make e1m1` | Trimmed E1M1 build |
+| `make e1m1-full` | Full E1M1 build |
+| `make test` | Complete automated suite |
+
+## Automation
+
+| Trigger | Action |
+|---|---|
+| `master` push | Build, test, and upload the full ROM artifact |
+| Pull request | Build and test |
+| Manual dispatch | Build, test, and upload the artifact |
+| `v*` tag | Build, test, and publish the ROM release asset |
