@@ -13,6 +13,7 @@ Icon\r
 *.nes
 *.wad
 *.WAD
+!Doom1.WAD
 *.dbg
 *.bin
 *.o

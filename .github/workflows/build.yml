@@ -1,0 +1,65 @@
+name: Build cartridge
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install cc65
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes cc65
+
+      - name: Run portable tests
+        run: make test-python
+
+      - name: Build cartridge
+        run: make e1m1-full
+
+      - name: Upload cartridge
+        uses: actions/upload-artifact@v4
+        with:
+          name: nes-doom-e1m1-full
+          path: nesdoom-e1m1-full.nes
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download cartridge
+        uses: actions/download-artifact@v4
+        with:
+          name: nes-doom-e1m1-full
+          path: dist
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/nesdoom-e1m1-full.nes \
+              --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/nesdoom-e1m1-full.nes \
+              --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes \
+              --title "$GITHUB_REF_NAME"
+          fi
