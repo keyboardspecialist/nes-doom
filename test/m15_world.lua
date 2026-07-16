@@ -30,7 +30,7 @@ end, emu.eventType.inputPolled)
 emu.addEventCallback(function()
   frames = frames + 1
   MT = emu.memType.nesDebug
-  if frames > 1400 then return fail("timed out in " .. state) end
+  if frames > 1800 then return fail("timed out in " .. state) end
 
   if state == "boot" and frames == 80 then
     -- Move onto the last full-map item. Successful collision checks switch the
@@ -65,18 +65,55 @@ emu.addEventCallback(function()
           pickupBitsBefore, pickupBits))
       end
 
-      -- Keep only monster slot 0 alive and place it across the closed start door.
+      -- Keep only monster slot 0 alive and trace across a thin static wall.
       for slot = 1, 5 do
         local thing = ({21, 29, 30, 44, 46})[slot]
         emu.write(0x6A2D + thing, 0, MT)
       end
-      write16(0x30, 0x3C66); write16(0x32, 0x3F33)
-      monster16(0x6AC2, 0, 0x3F33); monster16(0x6AD2, 0, 0x3F33)
+      write16(0x30, 0x3F66); write16(0x32, 0x38DA)
+      monster16(0x6AC2, 0, 0x3F66); monster16(0x6AD2, 0, 0x3E1A)
+      emu.write(0x6AE2, 0, MT)
       emu.write(0x6AF2, (emu.read(0x00, MT) - 64) % 256, MT)
       emu.write(0x6A05, 200, MT)
       attacksBefore = emu.read(0x6AFC, MT)
+      state = "static_wall"
+      stateAt = frames
+    end
+
+  elseif state == "static_wall" then
+    emu.write(0x6AEA, emu.read(0x00, MT), MT)
+    if frames - stateAt == 100 then
+      if emu.read(0x6AFC, MT) ~= attacksBefore then
+        return fail("enemy attacked through static wall")
+      end
+      state = "wall_pursuit"
+      stateAt = frames
+    end
+
+  elseif state == "wall_pursuit" then
+    emu.write(0x6AF2, emu.read(0x00, MT), MT)
+    if frames - stateAt == 200 then
+      local monsterY = emu.read(0x6AD2, MT) + 256 * emu.read(0x6ADA, MT)
+      if monsterY >= 0x3E1A then return fail("enemy did not pursue player") end
+      if monsterY < 0x3D9A then return fail("enemy pursued through static wall") end
+      write16(0x30, 0x3F66); write16(0x32, 0x3F1A)
+      emu.write(0x6AF2, (emu.read(0x00, MT) - 64) % 256, MT)
+      state = "static_clear"
+      stateAt = frames
+    end
+
+  elseif state == "static_clear" then
+    emu.write(0x6AEA, emu.read(0x00, MT), MT)
+    if emu.read(0x6AFC, MT) > attacksBefore then
+      -- Place the same monster across the closed start door.
+      write16(0x30, 0x3C66); write16(0x32, 0x3F33)
+      monster16(0x6AC2, 0, 0x3F33); monster16(0x6AD2, 0, 0x3F33)
+      emu.write(0x6AF2, (emu.read(0x00, MT) - 64) % 256, MT)
+      attacksBefore = emu.read(0x6AFC, MT)
       state = "closed_los"
       stateAt = frames
+    elseif frames - stateAt > 140 then
+      return fail("enemy did not attack on clear side of static wall")
     end
 
   elseif state == "closed_los" then
@@ -128,7 +165,7 @@ emu.addEventCallback(function()
   elseif state == "exit" then
     if frames - stateAt > 3 then wantUse = false end
     if emu.read(0x16, MT) == 0x87 and frames - stateAt > 5 then
-      print("M15 PASS (moving pickup, closed/open LOS, lift, exit-to-title)")
+      print("M15 PASS (pickup, static/door LOS, lift, exit-to-title)")
       emu.stop(0)
     elseif frames - stateAt > 120 then
       return fail("exit switch did not return to title")

@@ -7,7 +7,7 @@ work.
 ## Summary
 
 - PRG-ROM capacity: 128 KiB in sixteen 8 KiB banks.
-- Full E1M1 PRG use: 72,397 bytes, leaving 58,675 bytes overall.
+- Full E1M1 PRG use: 72,561 bytes, leaving 58,511 bytes overall.
 - CHR-ROM capacity: 1 MiB.
 - Generated CHR prefix: 536,576 bytes; the remaining 512,000 bytes are
   linker-filled zeros.
@@ -35,9 +35,9 @@ The cartridge contains sixteen 8 KiB PRG-ROM banks.
 | 0A-0C | Unused | 0 | 24,576 total |
 | 0D | Door/lift/exit code | 1,272 | 6,920 |
 | 0E | Main code | 7,844 | 348 |
-| 0F | Fixed code and vectors | 7,153 | 1,039 |
+| 0F | Fixed code and vectors | 7,317 | 875 |
 
-Full E1M1 uses 72,397 bytes and leaves 58,675 bytes overall. The trimmed
+Full E1M1 uses 72,561 bytes and leaves 58,511 bytes overall. The trimmed
 build uses approximately 56.1 KiB and leaves approximately 75.0 KiB.
 
 ### Placement Pressure
@@ -46,7 +46,7 @@ build uses approximately 56.1 KiB and leaves approximately 75.0 KiB.
 - Bank 04 has only eight bytes free and cannot hold additional full-map segs
   without changing the seg split.
 - Main `CODE` in bank 0E has 348 bytes free.
-- Fixed bank 0F has 1,039 bytes free before vectors.
+- Fixed bank 0F has 875 bytes free before vectors.
 - Door bank 0D has approximately 6.8 KiB free.
 - Pusher banks 02 and 03 intentionally have only 64 bytes free each.
 - Music bank 08 has 207 bytes free.

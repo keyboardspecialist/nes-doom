@@ -1,6 +1,6 @@
-; Compact zombieman simulation. Movement is direct pursuit because this PoC
-; has no BLOCKMAP collision/pathfinding yet; mutable subsectors keep rendering
-; and floor selection coherent as actors cross BSP leaves.
+; Compact zombieman simulation. Movement is collision-tested direct pursuit;
+; there is no pathfinding around blockers yet. Mutable subsectors keep
+; rendering and floor selection coherent as actors cross BSP leaves.
 .include "zeropage.inc"
 .include "mmc5.inc"
 .include "globals.inc"
@@ -8,7 +8,7 @@
 .export update_enemies
 
 .ifdef E1M1
-.import find_subsector, move_blocked, move_leaf, move_radius
+.import find_subsector, move_blocked, move_blocked_leaf, move_leaf, move_radius
 .import monster_thing_idx, MONSTER_COUNT
 
 .segment "BSS"
@@ -164,91 +164,155 @@ enemy_is_active:
     rts
 
 move_enemy:
-    ; Move one converted world unit on each differing axis.
+    ; move_blocked operates on px/py, so retain the player as the pursuit target
+    ; while the temporary camera position tracks this monster.
+    lda px
+    sta enemy_sight_x
+    lda px+1
+    sta enemy_sight_x+1
+    lda py
+    sta enemy_sight_y
+    lda py+1
+    sta enemy_sight_y+1
+    lda MONSTER_X_LO,x
+    sta px
     lda MONSTER_X_HI,x
-    cmp px+1
+    sta px+1
+    lda MONSTER_Y_LO,x
+    sta py
+    lda MONSTER_Y_HI,x
+    sta py+1
+    lda MONSTER_SS,x
+    sta move_leaf
+    lda #96             ; six-unit actor radius, larger than a one-unit step
+    sta move_radius
+    lda #0
+    sta move_radius+1
+
+    ; Move one converted world unit on each differing axis.
+    lda px+1
+    cmp enemy_sight_x+1
     bcc @x_inc
     bne @x_dec
-    lda MONSTER_X_LO,x
-    cmp px
+    lda px
+    cmp enemy_sight_x
     bcc @x_inc
     beq @move_y
 @x_dec:
-    lda MONSTER_X_LO,x
-    sec
-    sbc #ENEMY_STEP
-    sta MONSTER_X_LO,x
-    lda MONSTER_X_HI,x
-    sbc #0
-    sta MONSTER_X_HI,x
-    jmp @move_y
+    lda #$F0
+    sta enemy_dx
+    lda #$FF
+    sta enemy_dx+1
+    bne @try_x
 @x_inc:
-    lda MONSTER_X_LO,x
+    lda #ENEMY_STEP
+    sta enemy_dx
+    lda #0
+    sta enemy_dx+1
+@try_x:
+    lda px
     clc
-    adc #ENEMY_STEP
-    sta MONSTER_X_LO,x
-    lda MONSTER_X_HI,x
-    adc #0
-    sta MONSTER_X_HI,x
+    adc enemy_dx
+    sta px
+    lda px+1
+    adc enemy_dx+1
+    sta px+1
+    jsr move_blocked_leaf
+    bcc @x_clear
+@x_blocked:
+    lda px
+    sec
+    sbc enemy_dx
+    sta px
+    lda px+1
+    sbc enemy_dx+1
+    sta px+1
+    jmp @move_y
+@x_clear:
+    lda move_leaf
+    sta enemy_damage
+    jsr find_subsector
+    stx move_leaf
+    cpx enemy_damage
+    beq @move_y
+    jsr move_blocked_leaf
+    bcc @move_y
+    lda enemy_damage
+    sta move_leaf
+    jmp @x_blocked
 
 @move_y:
-    lda MONSTER_Y_HI,x
-    cmp py+1
+    lda py+1
+    cmp enemy_sight_y+1
     bcc @y_inc
     bne @y_dec
-    lda MONSTER_Y_LO,x
-    cmp py
+    lda py
+    cmp enemy_sight_y
     bcc @y_inc
     beq @locate
 @y_dec:
-    lda MONSTER_Y_LO,x
-    sec
-    sbc #ENEMY_STEP
-    sta MONSTER_Y_LO,x
-    lda MONSTER_Y_HI,x
-    sbc #0
-    sta MONSTER_Y_HI,x
-    jmp @locate
+    lda #$F0
+    sta enemy_dy
+    lda #$FF
+    sta enemy_dy+1
+    bne @try_y
 @y_inc:
-    lda MONSTER_Y_LO,x
+    lda #ENEMY_STEP
+    sta enemy_dy
+    lda #0
+    sta enemy_dy+1
+@try_y:
+    lda py
     clc
-    adc #ENEMY_STEP
-    sta MONSTER_Y_LO,x
-    lda MONSTER_Y_HI,x
-    adc #0
-    sta MONSTER_Y_HI,x
+    adc enemy_dy
+    sta py
+    lda py+1
+    adc enemy_dy+1
+    sta py+1
+    jsr move_blocked_leaf
+    bcc @y_clear
+@y_blocked:
+    lda py
+    sec
+    sbc enemy_dy
+    sta py
+    lda py+1
+    sbc enemy_dy+1
+    sta py+1
+    jmp @locate
+@y_clear:
+    lda move_leaf
+    sta enemy_damage
+    jsr find_subsector
+    stx move_leaf
+    cpx enemy_damage
+    beq @locate
+    jsr move_blocked_leaf
+    bcc @locate
+    lda enemy_damage
+    sta move_leaf
+    jmp @y_blocked
 
 @locate:
-    ; find_subsector operates on px/py; preserve the player camera around it.
-    lda px
-    pha
-    lda px+1
-    pha
-    lda py
-    pha
-    lda py+1
-    pha
-    ldx enemy_slot
-    lda MONSTER_X_LO,x
-    sta px
-    lda MONSTER_X_HI,x
-    sta px+1
-    lda MONSTER_Y_LO,x
-    sta py
-    lda MONSTER_Y_HI,x
-    sta py+1
-    jsr find_subsector
-    txa
+    lda move_leaf
     ldx enemy_slot
     sta MONSTER_SS,x
-    pla
-    sta py+1
-    pla
-    sta py
-    pla
-    sta px+1
-    pla
+    lda px
+    sta MONSTER_X_LO,x
+    lda px+1
+    sta MONSTER_X_HI,x
+    lda py
+    sta MONSTER_Y_LO,x
+    lda py+1
+    sta MONSTER_Y_HI,x
+    lda enemy_sight_x
     sta px
+    lda enemy_sight_x+1
+    sta px+1
+    lda enemy_sight_y
+    sta py
+    lda enemy_sight_y+1
+    sta py+1
 .ifdef FULL_E1M1
     lda #MAP_COMMON_BANK
     sta MMC5_PRG_A000
@@ -302,9 +366,9 @@ enemy_in_range:
     sec
     rts
 
-; Trace sixteen collision-tested substeps from the monster to the player.
-; The attack range bounds each step to eight converted world units, so a
-; one-sided wall or non-passable dynamic door cannot be skipped.
+; Trace sixteen collision-tested substeps from the monster to the player. At
+; the attack-range limit adjacent samples are under twelve units apart, so the
+; six-unit actor radius overlaps them without leaving wall-tunneling gaps.
 enemy_has_los:
     lda px
     sta enemy_sight_x
@@ -349,7 +413,7 @@ enemy_has_los:
     sta py+1
     lda #16
     sta enemy_sight_n
-    lda #32             ; point-like ray tolerance, smaller than player radius
+    lda #96             ; six converted world units
     sta move_radius
     lda #0
     sta move_radius+1

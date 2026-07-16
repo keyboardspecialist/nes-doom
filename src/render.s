@@ -49,7 +49,7 @@
 .import init_doors, update_doors, try_use, check_walk_special
 .endif
 .export render_frame, init_camera, do_seg, fetch_vertex, sub_cam, zdot, xdot
-.export move_blocked, move_leaf, move_radius
+.export move_blocked, move_blocked_leaf, move_leaf, move_radius
 .ifdef E1M1
 .export draw_subsector_things, init_oam_set
 .endif
@@ -481,7 +481,13 @@ try_move_axes:
 move_blocked:
     lda #0
     sta move_pass
-@scan_leaf:
+    jmp move_blocked_scan_leaf
+; One-unit actor movement cannot skip a convex leaf boundary. Callers refresh
+; move_leaf after an accepted portal crossing instead of rescanning both leaves.
+move_blocked_leaf:
+    lda #1
+    sta move_pass
+move_blocked_scan_leaf:
 .ifdef FULL_E1M1
     lda #MAP_COMMON_BANK
     sta MMC5_PRG_A000
@@ -526,7 +532,7 @@ move_blocked:
     beq @clear
     stx move_leaf
     inc move_pass
-    jmp @scan_leaf
+    jmp move_blocked_scan_leaf
 @clear:
     clc
     rts
